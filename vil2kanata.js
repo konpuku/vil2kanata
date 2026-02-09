@@ -78,10 +78,9 @@ const BASIC_KEYCODE_MAP = {
   // 日本語キー
   KC_RO: 'ro',
   KC_JYEN: '¥',
-  KC_NONUS_HASH: 'nuhs',
+  KC_NONUS_HASH: '\\',
   KC_LANG1: 'kana',
-  KC_LANG2: 'eisu',
-  KC_APPLICATION: 'comp', KC_APP: 'comp',
+  KC_APPLICATION: 'menu', KC_APP: 'menu',
 
   // マウスキー（ボタンのみ直接マッピング、移動はエイリアス化）
   KC_BTN1: 'mlft',
@@ -111,6 +110,12 @@ const BASIC_KEYCODE_MAP = {
   KC_MPRV: 'prev',
   KC_MPLY: 'pp',
   KC_MSTP: 'stop',
+}
+
+// Kanataに標準キー名がないキー（arbitrary-codeで定義）
+// Windows Virtual Key Code を使用
+const ARBITRARY_CODE_KEYS = {
+  KC_LANG2: { name: 'eisu', code: 240, comment: ';; 英数 (VK_DBE_ALPHANUMERIC)' },
 }
 
 // 修飾キーのプレフィックスマッピング
@@ -318,12 +323,77 @@ const MOUSE_MOVE_MAP = {
   KC_MS_D: { name: 'ms-d', value: '(movemouse-down 1 1)' },
 }
 
+// defsrc重複キー解消用の代替キープール
+const DEFSRC_SUBSTITUTE_POOL = [
+  'f13', 'f15', 'f16', 'f17', 'f18', 'f19', 'f20',
+  'f21', 'f22', 'f23', 'f24',
+  'ins', 'pause', 'slck', 'prnt',
+  'kp0', 'kp1', 'kp2', 'kp3', 'kp4', 'kp5',
+  'kp6', 'kp7', 'kp8', 'kp9',
+]
+
+/**
+ * defsrcキー配列から重複を除去し、代替キーで置換する
+ * 戻り値: { uniqueKeys: string[], duplicateInfo: Array<{original, substitute, position}> }
+ */
+function makeDefsrcKeysUnique(allKeys) {
+  const usedKeys = new Set(allKeys)
+  const seen = new Map()
+  const uniqueKeys = []
+  const duplicateInfo = []
+  let subIdx = 0
+
+  for (let i = 0; i < allKeys.length; i++) {
+    const key = allKeys[i]
+    if (key === 'XX' || !seen.has(key)) {
+      seen.set(key, i)
+      uniqueKeys.push(key)
+    } else {
+      while (subIdx < DEFSRC_SUBSTITUTE_POOL.length && usedKeys.has(DEFSRC_SUBSTITUTE_POOL[subIdx])) {
+        subIdx++
+      }
+      if (subIdx < DEFSRC_SUBSTITUTE_POOL.length) {
+        const sub = DEFSRC_SUBSTITUTE_POOL[subIdx]
+        uniqueKeys.push(sub)
+        usedKeys.add(sub)
+        duplicateInfo.push({ original: key, substitute: sub, position: i })
+        subIdx++
+      } else {
+        uniqueKeys.push(key)
+      }
+    }
+  }
+
+  return { uniqueKeys, duplicateInfo }
+}
+
+/**
+ * defsrcの物理キー名を抽出する（QMKキーコード→defsrcキー名）
+ */
+function extractDefsrcKey(key) {
+  if (BASIC_KEYCODE_MAP[key] !== undefined) return BASIC_KEYCODE_MAP[key]
+  const modTap = parseModTap(key)
+  if (modTap) return modTap.key
+  const layerTap = parseLayerTap(key)
+  if (layerTap) return layerTap.key
+  const userKey = parseUserKeycode(key)
+  if (userKey) return `f${13 + userKey.index}`
+  return 'XX'
+}
+
 function convertKeycode(qmkStr, aliasContext) {
   if (!qmkStr || qmkStr === '') return { kanata: 'XX' }
 
   // 基本キーコード
   if (BASIC_KEYCODE_MAP[qmkStr] !== undefined) {
     return { kanata: BASIC_KEYCODE_MAP[qmkStr] }
+  }
+
+  // arbitrary-codeが必要なキー（エイリアス化）
+  if (ARBITRARY_CODE_KEYS[qmkStr]) {
+    const arb = ARBITRARY_CODE_KEYS[qmkStr]
+    aliasContext.registerArbitraryCode(arb.name, arb.code, arb.comment)
+    return { kanata: `@${arb.name}` }
   }
 
   // マウス移動キー（エイリアス化）
@@ -624,6 +694,10 @@ function convertBasicOrModified(qmkStr) {
   if (BASIC_KEYCODE_MAP[qmkStr] !== undefined) {
     return BASIC_KEYCODE_MAP[qmkStr]
   }
+  // arbitrary-codeが必要なキー（コンボ結果等ではエイリアス参照）
+  if (ARBITRARY_CODE_KEYS[qmkStr]) {
+    return `@${ARBITRARY_CODE_KEYS[qmkStr].name}`
+  }
   const modified = parseModified(qmkStr)
   if (modified) {
     return formatKeycode(modified)
@@ -674,6 +748,55 @@ function convertCombo(comboData, macroNames) {
     : ''
 
   // 結果の変換
+  let resultStr
+  const macroRef = parseMacroRef(result)
+  if (macroRef && macroNames.has(macroRef.index)) {
+    resultStr = `@m${macroRef.index}`
+  } else if (BASIC_KEYCODE_MAP[result] !== undefined) {
+    resultStr = BASIC_KEYCODE_MAP[result]
+  } else {
+    resultStr = convertBasicOrModified(result)
+  }
+
+  const comment = `;; ${keys.join(' + ')} → ${result}${duplicateWarning}`
+
+  return {
+    keys: inputKeys,
+    result: resultStr,
+    comment,
+  }
+}
+
+/**
+ * 位置ベースのコンボ変換。defsrcの重複キー置換に対応
+ * qmkToPositions: QMKキーコード → ベースレイヤー内の位置インデックス配列
+ * uniqueDefsrcKeys: 重複解消済みのdefsrcキー配列
+ */
+function convertComboWithPositions(comboData, macroNames, qmkToPositions, uniqueDefsrcKeys) {
+  const [key1, key2, key3, key4, result] = comboData
+  const keys = [key1, key2, key3, key4].filter((k) => k && k !== 'KC_NO')
+
+  if (keys.length < 2) return null
+
+  // 位置ベースでdefsrcキーを解決
+  const usedPositions = new Set()
+  const inputKeys = keys.map((qmkStr) => {
+    const positions = qmkToPositions.get(qmkStr) || []
+    for (const pos of positions) {
+      if (!usedPositions.has(pos)) {
+        usedPositions.add(pos)
+        return uniqueDefsrcKeys[pos]
+      }
+    }
+    // フォールバック: 位置が見つからない場合は旧方式
+    return comboInputKey(qmkStr)
+  })
+
+  const hasDuplicateKeys = new Set(inputKeys).size !== inputKeys.length
+  const duplicateWarning = hasDuplicateKeys
+    ? ' ;; WARNING: 重複キーあり。defsrc調整後にコンボキーも修正してください'
+    : ''
+
   let resultStr
   const macroRef = parseMacroRef(result)
   if (macroRef && macroNames.has(macroRef.index)) {
@@ -803,6 +926,17 @@ function createAliasContext() {
       return name
     },
 
+    registerArbitraryCode(name, code, comment) {
+      if (!aliases.has(name)) {
+        aliases.set(name, {
+          type: 'arbitrary-code',
+          value: `(arbitrary-code ${code})`,
+          comment: comment || null,
+        })
+      }
+      return name
+    },
+
     registerMouseMove(name, value) {
       if (!aliases.has(name)) {
         aliases.set(name, {
@@ -874,11 +1008,60 @@ function generateKanataConfig(vilData, inputFileName) {
   )
 
   // --------------------------------------------------------
-  // 4. コンボ変換
+  // 3.5. defsrcキー計算（コンボ変換で必要）
+  // --------------------------------------------------------
+  const baseLayer = layout[0] || []
+  const defsrcRows = []
+  const allDefsrcKeys = []
+  const baseLayerFlat = []
+  for (const row of baseLayer) {
+    const defsrcKeys = row.map((key) => {
+      baseLayerFlat.push(key)
+      return extractDefsrcKey(key)
+    })
+    defsrcRows.push(defsrcKeys)
+    allDefsrcKeys.push(...defsrcKeys)
+  }
+
+  const { uniqueKeys: uniqueDefsrcKeys, duplicateInfo } = makeDefsrcKeysUnique(allDefsrcKeys)
+
+  // QMKキーコード → ベースレイヤー位置マップ（コンボ用）
+  const qmkToPositions = new Map()
+  for (let i = 0; i < baseLayerFlat.length; i++) {
+    if (!qmkToPositions.has(baseLayerFlat[i])) {
+      qmkToPositions.set(baseLayerFlat[i], [])
+    }
+    qmkToPositions.get(baseLayerFlat[i]).push(i)
+  }
+
+  // --------------------------------------------------------
+  // 3.6. arbitrary-codeキーのエイリアス登録（コンボ結果等で使用される場合）
+  // --------------------------------------------------------
+  const allKeycodes = new Set()
+  for (const layer of layout) {
+    for (const row of layer) {
+      for (const key of row) {
+        allKeycodes.add(key)
+      }
+    }
+  }
+  for (const combo of combos) {
+    for (const key of combo) {
+      if (key) allKeycodes.add(key)
+    }
+  }
+  for (const [qmkStr, arb] of Object.entries(ARBITRARY_CODE_KEYS)) {
+    if (allKeycodes.has(qmkStr)) {
+      aliasContext.registerArbitraryCode(arb.name, arb.code, arb.comment)
+    }
+  }
+
+  // --------------------------------------------------------
+  // 4. コンボ変換（位置ベース）
   // --------------------------------------------------------
   const macroNameSet = new Set(macroAliases.keys())
   const convertedCombos = combos
-    .map((c) => convertCombo(c, macroNameSet))
+    .map((c) => convertComboWithPositions(c, macroNameSet, qmkToPositions, uniqueDefsrcKeys))
     .filter(Boolean)
 
   // --------------------------------------------------------
@@ -913,43 +1096,27 @@ function generateKanataConfig(vilData, inputFileName) {
   lines.push(')')
   lines.push('')
 
-  // defsrc
+  // defsrc（事前計算済みのuniqueDefsrcKeysを使用）
   lines.push(';; ============================================================')
   lines.push(`;; defsrc: 物理レイアウト (${colCount}x${rowCount})`)
   lines.push(';; ノートPCのレイアウトに合わせて書き換えてください。')
   lines.push(';; defsrc内のキー数とdeflayer内のキー数は一致する必要があります。')
   lines.push(';; ============================================================')
   lines.push('(defsrc')
-  const baseLayer = layout[0] || []
-  const allDefsrcKeys = []
-  for (const row of baseLayer) {
-    const defsrcKeys = row.map((key) => {
-      if (BASIC_KEYCODE_MAP[key] !== undefined) return BASIC_KEYCODE_MAP[key]
-      const modTap = parseModTap(key)
-      if (modTap) return modTap.key
-      const layerTap = parseLayerTap(key)
-      if (layerTap) return layerTap.key
-      const userKey = parseUserKeycode(key)
-      if (userKey) return `f${13 + userKey.index}` // プレースホルダー（要手動調整）
-      return 'XX'
-    })
-    allDefsrcKeys.push(...defsrcKeys)
-    lines.push(`  ${padKeys(defsrcKeys).join(' ')}`)
+  let defsrcOffset = 0
+  for (const row of defsrcRows) {
+    const uniqueRow = uniqueDefsrcKeys.slice(defsrcOffset, defsrcOffset + row.length)
+    lines.push(`  ${padKeys(uniqueRow).join(' ')}`)
+    defsrcOffset += row.length
   }
   lines.push(')')
 
-  // defsrc重複キー警告
-  const keyCounts = new Map()
-  for (const k of allDefsrcKeys) {
-    if (k !== 'XX') {
-      keyCounts.set(k, (keyCounts.get(k) || 0) + 1)
+  // defsrc重複キー自動置換情報
+  if (duplicateInfo.length > 0) {
+    lines.push(`;; NOTE: defsrc内の重複キーを自動的に代替キーに置換しました:`)
+    for (const dup of duplicateInfo) {
+      lines.push(`;;   ${dup.original} → ${dup.substitute} (位置: ${dup.position})`)
     }
-  }
-  const duplicates = [...keyCounts.entries()].filter(([, count]) => count > 1)
-  if (duplicates.length > 0) {
-    const dupStr = duplicates.map(([k, c]) => `${k}(${c}回)`).join(', ')
-    lines.push(`;; WARNING: defsrc内に重複キーがあります: ${dupStr}`)
-    lines.push(';; Kanataは各物理キーが一意である必要があります。defsrcを手動で修正してください。')
   }
   lines.push('')
 
