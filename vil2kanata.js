@@ -79,7 +79,7 @@ const BASIC_KEYCODE_MAP = {
   KC_RO: 'ro',
   KC_JYEN: '¥',
   KC_NONUS_HASH: '\\',
-  KC_LANG1: 'kana',
+  KC_LANG1: 'kana', KC_LNG1: 'kana',
   KC_APPLICATION: 'menu', KC_APP: 'menu',
 
   // マウスキー（ボタンのみ直接マッピング、移動はエイリアス化）
@@ -116,6 +116,7 @@ const BASIC_KEYCODE_MAP = {
 // Windows Virtual Key Code を使用
 const ARBITRARY_CODE_KEYS = {
   KC_LANG2: { name: 'eisu', code: 240, comment: ';; 英数 (VK_DBE_ALPHANUMERIC)' },
+  KC_LNG2: { name: 'eisu', code: 240, comment: ';; 英数 (VK_DBE_ALPHANUMERIC)' },
 }
 
 // 修飾キーのプレフィックスマッピング
@@ -371,6 +372,7 @@ function makeDefsrcKeysUnique(allKeys) {
  * defsrcの物理キー名を抽出する（QMKキーコード→defsrcキー名）
  */
 function extractDefsrcKey(key) {
+  if (!key || typeof key !== 'string') return 'XX'
   if (BASIC_KEYCODE_MAP[key] !== undefined) return BASIC_KEYCODE_MAP[key]
   const modTap = parseModTap(key)
   if (modTap) return modTap.key
@@ -382,7 +384,7 @@ function extractDefsrcKey(key) {
 }
 
 function convertKeycode(qmkStr, aliasContext) {
-  if (!qmkStr || qmkStr === '') return { kanata: 'XX' }
+  if (!qmkStr || qmkStr === '' || typeof qmkStr !== 'string') return { kanata: 'XX' }
 
   // 基本キーコード
   if (BASIC_KEYCODE_MAP[qmkStr] !== undefined) {
@@ -846,10 +848,429 @@ function convertKeyOverride(ko) {
 }
 
 // ============================================================
+// QMKファームウェアソースパーサー
+// ============================================================
+
+/**
+ * vial.jsonからカスタムキーコード情報を読み込む
+ * @param {string} filePath - vial.jsonのパス
+ * @returns {Map<number, {name: string, title: string, shortName: string}>}
+ */
+function parseVialJson(filePath) {
+  const result = new Map()
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    const data = JSON.parse(raw)
+    const customKeycodes = data.customKeycodes || []
+    for (let i = 0; i < customKeycodes.length; i++) {
+      const entry = customKeycodes[i]
+      result.set(i, {
+        name: entry.name || `CUSTOM_${i}`,
+        title: entry.title || '',
+        shortName: entry.shortName || '',
+      })
+    }
+  } catch (err) {
+    console.error(`警告: vial.jsonの読み込みに失敗: ${err.message}`)
+  }
+  return result
+}
+
+/**
+ * QMKキーコード名をKanataキー名に変換するヘルパー（keymap.cパーサー内で使用）
+ */
+function qmkKeyToKanata(qmkKey) {
+  // KC_プレフィックスを正規化
+  const normalized = qmkKey.startsWith('KC_') ? qmkKey : `KC_${qmkKey}`
+  if (BASIC_KEYCODE_MAP[normalized] !== undefined) {
+    return BASIC_KEYCODE_MAP[normalized]
+  }
+  if (ARBITRARY_CODE_KEYS[normalized]) {
+    return `(arbitrary-code ${ARBITRARY_CODE_KEYS[normalized].code})`
+  }
+  return null
+}
+
+/**
+ * keymap.cからカスタムキーコードの定義と動作パターンを解析する
+ * @param {string} filePath - keymap.cのパス
+ * @returns {{userKeyPatterns: Map<number, object>, tappingTerm: number}}
+ */
+function parseKeymapC(filePath) {
+  const userKeyPatterns = new Map()
+  let tappingTerm = 200
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+
+    // TAPPING_TERM抽出
+    const tappingMatch = raw.match(/#define\s+TAPPING_TERM\s+(\d+)/)
+    if (tappingMatch) {
+      tappingTerm = parseInt(tappingMatch[1], 10)
+    }
+
+    // enum custom_keycodes からキー名とインデックスを抽出
+    const enumMap = new Map() // keyName → index
+    const enumRegex = /enum\s+custom_keycodes\s*\{([^}]+)\}/s
+    const enumMatch = raw.match(enumRegex)
+    if (enumMatch) {
+      const enumBody = enumMatch[1]
+      const entries = enumBody.split(',').map((e) => e.trim()).filter(Boolean)
+      let currentIndex = 0
+      for (const entry of entries) {
+        // コメント除去
+        const clean = entry.replace(/\/\/.*$/, '').replace(/\/\*.*?\*\//g, '').trim()
+        if (!clean) continue
+        const assignMatch = clean.match(/^(\w+)\s*=\s*QK_KB_(\d+)/)
+        if (assignMatch) {
+          currentIndex = parseInt(assignMatch[2], 10)
+          enumMap.set(assignMatch[1], currentIndex)
+          currentIndex++
+        } else {
+          const nameMatch = clean.match(/^(\w+)/)
+          if (nameMatch) {
+            enumMap.set(nameMatch[1], currentIndex)
+            currentIndex++
+          }
+        }
+      }
+    }
+
+    // process_record_user内のcaseブロックを解析
+    const processRecordRegex = /bool\s+process_record_user\s*\([^)]*\)\s*\{([\s\S]*?)^\}/m
+    const processMatch = raw.match(processRecordRegex)
+    if (processMatch) {
+      const funcBody = processMatch[1]
+
+      for (const [keyName, index] of enumMap) {
+        const pattern = analyzeUserKeyPattern(keyName, index, funcBody, tappingTerm)
+        if (pattern) {
+          userKeyPatterns.set(index, pattern)
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`警告: keymap.cの読み込みに失敗: ${err.message}`)
+  }
+
+  return { userKeyPatterns, tappingTerm }
+}
+
+/**
+ * process_record_user内の特定キーのcaseブロックを解析してパターンを判定
+ */
+function analyzeUserKeyPattern(keyName, index, funcBody, tappingTerm) {
+  // caseブロックを抽出（次のcase/defaultまで）
+  const caseRegex = new RegExp(`case\\s+${keyName}\\s*:([\\s\\S]*?)(?=case\\s+\\w+\\s*:|default\\s*:|$)`)
+  const caseMatch = funcBody.match(caseRegex)
+  if (!caseMatch) return null
+
+  const caseBody = caseMatch[1]
+
+  // パターンA: タイマーベースtap-hold（IME_ENTER型）
+  // 特徴: record->event.pressed内でtimer記録、!pressed内でtimer比較
+  const hasTimer = /timer\s*=/.test(caseBody) || /key_timer/.test(caseBody)
+  const hasTappingTermCheck = /TAPPING_TERM/.test(caseBody) || /tapping_term/.test(caseBody)
+
+  if (hasTimer && hasTappingTermCheck) {
+    return analyzeTimerBasedPattern(keyName, index, caseBody, tappingTerm)
+  }
+
+  // パターンB: SandS方式（IME_SPACE型）
+  // 特徴: フラグ変数で状態管理、他キー入力検出
+  const hasFlag = /_pressed\s*=/.test(caseBody) || /_active\s*=/.test(caseBody)
+  if (hasFlag) {
+    return analyzeSandSPattern(keyName, index, caseBody, tappingTerm)
+  }
+
+  // 単純なtap_code/register_code パターン
+  return analyzeSimplePattern(keyName, index, caseBody)
+}
+
+/**
+ * タイマーベースtap-hold パターンを解析（IME_ENTER型）
+ */
+function analyzeTimerBasedPattern(keyName, index, caseBody, tappingTerm) {
+  // pressed時のtap_code抽出
+  const pressedTapCodes = []
+  const releasedTapCodesShort = [] // timer < TAPPING_TERM
+  const releasedTapCodesLong = [] // timer >= TAPPING_TERM
+
+  // pressed ブロック内のtap_code
+  const pressedBlock = extractPressedBlock(caseBody)
+  if (pressedBlock) {
+    const taps = extractTapCodes(pressedBlock)
+    pressedTapCodes.push(...taps)
+  }
+
+  // released ブロック内のtap_code（timer条件分岐）
+  const releasedBlock = extractReleasedBlock(caseBody)
+  if (releasedBlock) {
+    // timer < TAPPING_TERM 条件のtap_code（タップ動作）
+    const shortMatch = releasedBlock.match(/timer_elapsed.*<\s*TAPPING_TERM[^{]*\{([^}]*)\}/s)
+      || releasedBlock.match(/TAPPING_TERM\s*>[^{]*\{([^}]*)\}/s)
+    if (shortMatch) {
+      releasedTapCodesShort.push(...extractTapCodes(shortMatch[1]))
+    }
+
+    // timer >= TAPPING_TERM 条件のtap_code（ホールド動作）
+    const longMatch = releasedBlock.match(/else\s*\{([^}]*)\}/s)
+    if (longMatch) {
+      releasedTapCodesLong.push(...extractTapCodes(longMatch[1]))
+    }
+  }
+
+  // Kanata式を構築
+  const tapKey = releasedTapCodesShort.length > 0
+    ? qmkKeyToKanata(releasedTapCodesShort[0])
+    : null
+  const holdKey = releasedTapCodesLong.length > 0
+    ? qmkKeyToKanata(releasedTapCodesLong[0])
+    : null
+  const pressKey = pressedTapCodes.length > 0
+    ? qmkKeyToKanata(pressedTapCodes[0])
+    : null
+
+  if (!tapKey && !holdKey) return null
+
+  const tap = tapKey || 'XX'
+  const hold = holdKey || 'XX'
+
+  let kanataExpr
+  let comment
+
+  if (pressKey) {
+    // 押下時にもキー送信がある場合
+    kanataExpr = `(tap-hold-release ${tappingTerm} ${tappingTerm} ${tap} ${hold})`
+    comment = `${keyName}: 押下時に${pressedTapCodes[0]}送信はKanataでは再現不可。タップ=${releasedTapCodesShort[0] || '?'}、ホールド=${releasedTapCodesLong[0] || '?'}`
+  } else {
+    kanataExpr = `(tap-hold-release ${tappingTerm} ${tappingTerm} ${tap} ${hold})`
+    comment = `${keyName}: タップ=${releasedTapCodesShort[0] || '?'}、ホールド=${releasedTapCodesLong[0] || '?'}`
+  }
+
+  return {
+    type: 'timer-tap-hold',
+    tap,
+    hold,
+    pressKey,
+    comment,
+    kanataExpr,
+  }
+}
+
+/**
+ * SandS方式パターンを解析（IME_SPACE型）
+ */
+function analyzeSandSPattern(keyName, index, caseBody, tappingTerm) {
+  // リリース時のtap_codeを収集
+  const releasedBlock = extractReleasedBlock(caseBody)
+  const allTapCodes = extractTapCodes(caseBody)
+
+  // SandS: タップ=Space系、ホールド=IME系のパターンを推測
+  let tapKey = null
+  let holdKey = null
+
+  if (releasedBlock) {
+    // active/flagチェック後のタップコード
+    const activeMatch = releasedBlock.match(/if\s*\([^)]*active[^)]*\)[^{]*\{([^}]*)\}/s)
+      || releasedBlock.match(/if\s*\([^)]*_pressed[^)]*\)[^{]*\{([^}]*)\}/s)
+    const elseMatch = releasedBlock.match(/else\s*\{([^}]*)\}/s)
+
+    if (activeMatch) {
+      const codes = extractTapCodes(activeMatch[1])
+      if (codes.length > 0) holdKey = qmkKeyToKanata(codes[0])
+    }
+    if (elseMatch) {
+      const codes = extractTapCodes(elseMatch[1])
+      if (codes.length > 0) tapKey = qmkKeyToKanata(codes[0])
+    }
+  }
+
+  // フォールバック: 全tap_codeから推測
+  if (!tapKey && !holdKey) {
+    const kanataKeys = allTapCodes.map(qmkKeyToKanata).filter(Boolean)
+    if (kanataKeys.length >= 2) {
+      tapKey = kanataKeys[1] // 2番目がタップ（よくあるパターン）
+      holdKey = kanataKeys[0]
+    } else if (kanataKeys.length === 1) {
+      tapKey = kanataKeys[0]
+    }
+  }
+
+  if (!tapKey && !holdKey) return null
+
+  const tap = tapKey || 'XX'
+  const hold = holdKey || 'kana'
+  const kanataExpr = `(tap-hold-release ${tappingTerm} ${tappingTerm} ${tap} ${hold})`
+  const comment = `${keyName}: SandS方式の完全再現は不可。タップ=${tap}、ホールド=${hold}に近似変換`
+
+  return {
+    type: 'sands',
+    tap,
+    hold,
+    comment,
+    kanataExpr,
+  }
+}
+
+/**
+ * 単純なパターンを解析（pressed時にtap_code送信のみ）
+ */
+function analyzeSimplePattern(keyName, index, caseBody) {
+  const tapCodes = extractTapCodes(caseBody)
+  if (tapCodes.length === 0) return null
+
+  const kanataKeys = tapCodes.map(qmkKeyToKanata).filter(Boolean)
+  if (kanataKeys.length === 0) return null
+
+  const kanataExpr = kanataKeys.length === 1
+    ? kanataKeys[0]
+    : `(multi ${kanataKeys.join(' ')})`
+  const comment = `${keyName}: ${tapCodes.join(', ')}`
+
+  return {
+    type: 'simple',
+    comment,
+    kanataExpr,
+  }
+}
+
+/**
+ * caseブロックからpressed条件のブロックを抽出
+ */
+function extractPressedBlock(caseBody) {
+  const match = caseBody.match(/if\s*\(\s*record\s*->\s*event\s*\.\s*pressed\s*\)\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/s)
+  return match ? match[1] : null
+}
+
+/**
+ * caseブロックからreleased条件のブロックを抽出
+ */
+function extractReleasedBlock(caseBody) {
+  // else ブロック（!pressed）- ネストされた{}を含むelseブロック全体を抽出
+  const elseMatch = caseBody.match(/\}\s*else\s*\{([\s\S]*?)(?:\n\s{12}return\s|\n\s{12}\}[\s\S]*?return\s)/s)
+  if (elseMatch) return elseMatch[1]
+
+  // よりシンプルなelse抽出: pressed if-elseの構造から
+  const simpleElse = caseBody.match(/\}\s*else\s*\{([\s\S]+)/s)
+  if (simpleElse) return simpleElse[1]
+
+  // if (!record->event.pressed) パターン
+  const notPressedMatch = caseBody.match(/if\s*\(\s*!\s*record\s*->\s*event\s*\.\s*pressed\s*\)\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/s)
+  return notPressedMatch ? notPressedMatch[1] : null
+}
+
+/**
+ * コードブロックからtap_code/register_code呼び出しのキー名を抽出
+ * Cコメント行内のものは除外する
+ */
+function extractTapCodes(block) {
+  const codes = []
+  // コメントを除去してからパース
+  const cleaned = block
+    .replace(/\/\/.*$/gm, '')          // 行コメント除去
+    .replace(/\/\*[\s\S]*?\*\//g, '')  // ブロックコメント除去
+  const regex = /(?:tap_code|register_code)\s*\(\s*(KC_\w+|\w+)\s*\)/g
+  let match
+  while ((match = regex.exec(cleaned)) !== null) {
+    codes.push(match[1])
+  }
+  return codes
+}
+
+/**
+ * config.hから設定値を読み込む
+ * @param {string} filePath - config.hのパス
+ * @returns {{layerCount: number|null, comboEntries: number|null, macroCount: number|null}}
+ */
+function parseConfigH(filePath) {
+  const config = { layerCount: null, comboEntries: null, macroCount: null }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+
+    const layerMatch = raw.match(/#define\s+DYNAMIC_KEYMAP_LAYER_COUNT\s+(\d+)/)
+    if (layerMatch) config.layerCount = parseInt(layerMatch[1], 10)
+
+    const comboMatch = raw.match(/#define\s+VIAL_COMBO_ENTRIES\s+(\d+)/)
+    if (comboMatch) config.comboEntries = parseInt(comboMatch[1], 10)
+
+    const macroMatch = raw.match(/#define\s+MACRO_COUNT\s+(\d+)/)
+    if (macroMatch) config.macroCount = parseInt(macroMatch[1], 10)
+  } catch (err) {
+    console.error(`警告: config.hの読み込みに失敗: ${err.message}`)
+  }
+  return config
+}
+
+/**
+ * ファームウェアディレクトリから全ソース情報を統合して読み込む
+ * @param {string} firmwareDir - keymaps/vial/ ディレクトリのパス
+ * @returns {object|null} ファームウェアコンテキスト
+ */
+function loadFirmwareContext(firmwareDir) {
+  if (!firmwareDir) return null
+
+  const resolvedDir = path.resolve(firmwareDir)
+  if (!fs.existsSync(resolvedDir)) {
+    console.error(`警告: ファームウェアディレクトリが見つかりません: ${resolvedDir}`)
+    return null
+  }
+
+  console.error(`ファームウェアソース読み込み: ${resolvedDir}`)
+
+  // vial.json
+  const vialJsonPath = path.join(resolvedDir, 'vial.json')
+  const customKeycodes = fs.existsSync(vialJsonPath)
+    ? parseVialJson(vialJsonPath)
+    : (() => { console.error('  警告: vial.jsonが見つかりません'); return new Map() })()
+
+  // keymap.c
+  const keymapCPath = path.join(resolvedDir, 'keymap.c')
+  const { userKeyPatterns, tappingTerm } = fs.existsSync(keymapCPath)
+    ? parseKeymapC(keymapCPath)
+    : (() => { console.error('  警告: keymap.cが見つかりません'); return { userKeyPatterns: new Map(), tappingTerm: 200 } })()
+
+  // config.h
+  const configHPath = path.join(resolvedDir, 'config.h')
+  const config = fs.existsSync(configHPath)
+    ? parseConfigH(configHPath)
+    : (() => { console.error('  警告: config.hが見つかりません'); return { layerCount: null, comboEntries: null, macroCount: null } })()
+
+  // config.hにTAPPING_TERMが定義されている場合、keymap.cのデフォルト値を上書き
+  if (tappingTerm === 200 && fs.existsSync(configHPath)) {
+    const configHContent = fs.readFileSync(configHPath, 'utf-8')
+    const configTapping = configHContent.match(/#define\s+TAPPING_TERM\s+(\d+)/)
+    if (configTapping) {
+      const configTappingVal = parseInt(configTapping[1], 10)
+      if (configTappingVal !== 200) {
+        // keymap.cにTAPPING_TERMが明示されていない場合、config.hの値を使う
+        return {
+          customKeycodes,
+          userKeyPatterns,
+          tappingTerm: configTappingVal,
+          config,
+        }
+      }
+    }
+  }
+
+  console.error(`  カスタムキーコード: ${customKeycodes.size}件`)
+  console.error(`  USERキーパターン: ${userKeyPatterns.size}件`)
+  console.error(`  TAPPING_TERM: ${tappingTerm}ms`)
+
+  return {
+    customKeycodes,
+    userKeyPatterns,
+    tappingTerm,
+    config,
+  }
+}
+
+// ============================================================
 // エイリアスコンテキスト
 // ============================================================
 
-function createAliasContext() {
+function createAliasContext(firmwareCtx) {
   const aliases = new Map()
 
   return {
@@ -915,13 +1336,35 @@ function createAliasContext() {
     },
 
     registerUser(parsed) {
-      const name = `usr${String(parsed.index).padStart(2, '0')}`
+      const nn = String(parsed.index).padStart(2, '0')
+      const name = `usr${nn}`
       if (!aliases.has(name)) {
-        aliases.set(name, {
-          type: 'user',
-          value: `XX ;; USER${String(parsed.index).padStart(2, '0')}: ユーザー定義キーコード（要手動設定）`,
-          comment: null,
-        })
+        const pattern = firmwareCtx?.userKeyPatterns?.get(parsed.index)
+        const vialInfo = firmwareCtx?.customKeycodes?.get(parsed.index)
+
+        if (pattern?.kanataExpr) {
+          // keymap.cからKanata式を自動生成
+          const label = vialInfo?.name || pattern.comment || `USER${nn}`
+          aliases.set(name, {
+            type: 'user',
+            value: pattern.kanataExpr,
+            comment: `;; USER${nn} (${label}): ${pattern.comment}`,
+          })
+        } else if (vialInfo) {
+          // vial.jsonから名前だけ判明
+          aliases.set(name, {
+            type: 'user',
+            value: `XX ;; USER${nn} (${vialInfo.name}): ${vialInfo.title}（要手動設定）`,
+            comment: null,
+          })
+        } else {
+          // 従来通り
+          aliases.set(name, {
+            type: 'user',
+            value: `XX ;; USER${nn}: ユーザー定義キーコード（要手動設定）`,
+            comment: null,
+          })
+        }
       }
       return name
     },
@@ -958,8 +1401,8 @@ function createAliasContext() {
 // メイン変換処理
 // ============================================================
 
-function generateKanataConfig(vilData, inputFileName) {
-  const aliasContext = createAliasContext()
+function generateKanataConfig(vilData, inputFileName, firmwareCtx) {
+  const aliasContext = createAliasContext(firmwareCtx)
   const layout = vilData.layout || []
   const macros = vilData.macro || []
   const tapDances = vilData.tap_dance || []
@@ -1080,6 +1523,12 @@ function generateKanataConfig(vilData, inputFileName) {
   lines.push(`;; Generated by vil2kanata`)
   lines.push(`;; Source: ${inputFileName}`)
   lines.push(`;; Layers: ${layerCount}, Macros: ${macroAliases.size}, TapDance: ${tdAliases.length}, Combos: ${convertedCombos.length}`)
+  if (firmwareCtx) {
+    lines.push(`;; Firmware: カスタムキーコード=${firmwareCtx.customKeycodes.size}, USERパターン=${firmwareCtx.userKeyPatterns.size}, TAPPING_TERM=${firmwareCtx.tappingTerm}ms`)
+    if (firmwareCtx.config.layerCount !== null) {
+      lines.push(`;; config.h: DYNAMIC_KEYMAP_LAYER_COUNT=${firmwareCtx.config.layerCount}`)
+    }
+  }
   lines.push('')
 
   // defcfg
@@ -1090,9 +1539,10 @@ function generateKanataConfig(vilData, inputFileName) {
   lines.push('')
 
   // defvar
+  const tapTime = firmwareCtx?.tappingTerm || 200
   lines.push('(defvar')
-  lines.push('  tap-time 200')
-  lines.push('  hold-time 200')
+  lines.push(`  tap-time ${tapTime}`)
+  lines.push(`  hold-time ${tapTime}`)
   lines.push(')')
   lines.push('')
 
@@ -1216,24 +1666,33 @@ function main() {
   const args = process.argv.slice(2)
 
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-    console.error('Usage: node vil2kanata.js <input.vil> [--output output.kbd]')
+    console.error('Usage: node vil2kanata.js <input.vil> [--output output.kbd] [--firmware-dir path/to/keymaps/vial]')
     console.error('')
     console.error('Vial (.vil) → Kanata (.kbd) converter')
     console.error('')
     console.error('Options:')
-    console.error('  --output, -o  出力ファイルパス（省略時はstdout）')
-    console.error('  --help, -h    ヘルプを表示')
+    console.error('  --output, -o       出力ファイルパス（省略時はstdout）')
+    console.error('  --firmware-dir, -f QMKファームウェアソースディレクトリ')
+    console.error('                     vial.json, keymap.c, config.h を自動検出し、')
+    console.error('                     USERキーコードの自動変換に使用します')
+    console.error('  --help, -h         ヘルプを表示')
     process.exit(args.includes('--help') || args.includes('-h') ? 0 : 1)
   }
 
   const inputPath = args[0]
   let outputPath = null
+  let firmwareDir = null
 
   const outputIdx = args.indexOf('--output')
   const outputIdxShort = args.indexOf('-o')
   const oIdx = outputIdx !== -1 ? outputIdx : outputIdxShort
   if (oIdx !== -1 && args[oIdx + 1]) {
     outputPath = args[oIdx + 1]
+  }
+
+  const fwIdx = args.indexOf('--firmware-dir') !== -1 ? args.indexOf('--firmware-dir') : args.indexOf('-f')
+  if (fwIdx !== -1 && args[fwIdx + 1]) {
+    firmwareDir = args[fwIdx + 1]
   }
 
   // ファイル読み込み
@@ -1261,9 +1720,12 @@ function main() {
     process.exit(1)
   }
 
+  // ファームウェアソース読み込み
+  const firmwareCtx = loadFirmwareContext(firmwareDir)
+
   // 変換
   const inputFileName = path.basename(inputPath)
-  const kanataConfig = generateKanataConfig(vilData, inputFileName)
+  const kanataConfig = generateKanataConfig(vilData, inputFileName, firmwareCtx)
 
   // 出力
   if (outputPath) {
