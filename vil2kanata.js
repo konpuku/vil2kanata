@@ -47,7 +47,7 @@ const BASIC_KEYCODE_MAP = {
   KC_EQUAL: '=', KC_EQL: '=',
   KC_LBRACKET: '[', KC_LBRC: '[',
   KC_RBRACKET: ']', KC_RBRC: ']',
-  KC_BACKSLASH: '\\', KC_BSLS: '\\',
+  KC_BACKSLASH: '\\', KC_BSLASH: '\\', KC_BSLS: '\\',
   KC_SCOLON: ';', KC_SCLN: ';',
   KC_QUOTE: '\'', KC_QUOT: '\'',
   KC_GRAVE: 'grv', KC_GRV: 'grv',
@@ -138,6 +138,7 @@ const MOD_TAP_HOLD_MAP = {
 // 複合修飾キーのマッピング
 const COMPOUND_MOD_MAP = {
   C_S: 'C-S-',
+  LCA: 'C-A-',
   MEH: 'C-A-S-',
   HYPR: 'C-A-S-M-',
 }
@@ -268,8 +269,12 @@ function convertBasicKeycode(qmkStr) {
   if (BASIC_KEYCODE_MAP[qmkStr] !== undefined) {
     return BASIC_KEYCODE_MAP[qmkStr]
   }
-  // 未知のキーコードはそのまま小文字化してコメント付き
-  return `XX ;; unknown: ${qmkStr}`
+  // arbitrary-codeキーはインライン式で返す（エイリアス参照ではなく直接展開）
+  if (ARBITRARY_CODE_KEYS[qmkStr]) {
+    return `(arbitrary-code ${ARBITRARY_CODE_KEYS[qmkStr].code})`
+  }
+  // 未知のキーコード
+  return 'XX'
 }
 
 /**
@@ -290,7 +295,7 @@ function formatKeycode(parsed) {
     return convertModified(parsed)
   }
 
-  return `XX ;; unhandled: ${JSON.stringify(parsed)}`
+  return 'XX'
 }
 
 /**
@@ -346,7 +351,21 @@ function makeDefsrcKeysUnique(allKeys) {
 
   for (let i = 0; i < allKeys.length; i++) {
     const key = allKeys[i]
-    if (key === 'XX' || !seen.has(key)) {
+    if (key === 'XX' || key === '_') {
+      // XX/_はdefsrcで使用不可のため、代替キーに置換
+      while (subIdx < DEFSRC_SUBSTITUTE_POOL.length && usedKeys.has(DEFSRC_SUBSTITUTE_POOL[subIdx])) {
+        subIdx++
+      }
+      if (subIdx < DEFSRC_SUBSTITUTE_POOL.length) {
+        const sub = DEFSRC_SUBSTITUTE_POOL[subIdx]
+        uniqueKeys.push(sub)
+        usedKeys.add(sub)
+        duplicateInfo.push({ original: key, substitute: sub, position: i })
+        subIdx++
+      } else {
+        uniqueKeys.push(key)
+      }
+    } else if (!seen.has(key)) {
       seen.set(key, i)
       uniqueKeys.push(key)
     } else {
@@ -374,10 +393,16 @@ function makeDefsrcKeysUnique(allKeys) {
 function extractDefsrcKey(key) {
   if (!key || typeof key !== 'string') return 'XX'
   if (BASIC_KEYCODE_MAP[key] !== undefined) return BASIC_KEYCODE_MAP[key]
+  // arbitrary-codeキーはdefsrcに直接置けないため XX に変換（後で代替キーに置換）
+  if (ARBITRARY_CODE_KEYS[key]) return 'XX'
   const modTap = parseModTap(key)
   if (modTap) return modTap.key
   const layerTap = parseLayerTap(key)
-  if (layerTap) return layerTap.key
+  if (layerTap) {
+    // 複合キー値はdefsrcに置けないためXXへフォールバック
+    if (layerTap.key.startsWith('XX') || layerTap.key.startsWith('@') || layerTap.key.startsWith('(')) return 'XX'
+    return layerTap.key
+  }
   const userKey = parseUserKeycode(key)
   if (userKey) return `f${13 + userKey.index}`
   return 'XX'
@@ -456,8 +481,9 @@ function convertKeycode(qmkStr, aliasContext) {
     return { kanata: `@${name}` }
   }
 
-  // 未知のキーコード
-  return { kanata: `XX ;; unknown: ${qmkStr}` }
+  // 未知のキーコード（コメントはKanataパーサーが別トークンとして解釈するためXXのみ）
+  console.error(`  警告: 未対応キーコード: ${qmkStr}`)
+  return { kanata: 'XX' }
 }
 
 // ============================================================
@@ -484,7 +510,7 @@ function convertMacroKeycode(qmkStr) {
     return formatKeycode(modified)
   }
 
-  return `XX ;; unknown: ${qmkStr}`
+  return 'XX'
 }
 
 /**
@@ -496,7 +522,7 @@ function convertTextToKeys(text) {
     if (TEXT_TO_KEYS_JIS[ch]) {
       keys.push(TEXT_TO_KEYS_JIS[ch])
     } else {
-      keys.push(`XX ;; unknown char: '${ch}'`)
+      keys.push('XX')
     }
   }
   return keys
@@ -708,7 +734,7 @@ function convertBasicOrModified(qmkStr) {
   if (modTap) {
     return `(tap-hold-release $tap-time $hold-time ${modTap.key} ${modTap.mod})`
   }
-  return `XX ;; unknown: ${qmkStr}`
+  return 'XX'
 }
 
 // ============================================================
