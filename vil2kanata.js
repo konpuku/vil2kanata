@@ -845,13 +845,27 @@ function convertComboWithPositions(comboData, macroNames, qmkToPositions, unique
 }
 
 // ============================================================
-// キーオーバーライド変換（コメント出力）
+// キーオーバーライド変換（defoverrides用）
 // ============================================================
 
 const TRIGGER_MOD_BITS = {
   1: 'LCtrl', 2: 'LShift', 4: 'LAlt', 8: 'LGui',
   16: 'RCtrl', 32: 'RShift', 64: 'RAlt', 128: 'RGui',
 }
+
+// ビットマスク → Kanata修飾キー名（左右個別）
+const TRIGGER_MOD_TO_KANATA = {
+  1: 'lctl', 2: 'lsft', 4: 'lalt', 8: 'lmet',
+  16: 'rctl', 32: 'rsft', 64: 'ralt', 128: 'rmet',
+}
+
+// 左右ペアの修飾ビット（両方指定されている場合に個別エントリへ展開）
+const MOD_LR_PAIRS = [
+  [1, 16],   // lctl, rctl
+  [2, 32],   // lsft, rsft
+  [4, 64],   // lalt, ralt
+  [8, 128],  // lmet, rmet
+]
 
 function describeTriggerMods(modBits) {
   const mods = []
@@ -863,14 +877,157 @@ function describeTriggerMods(modBits) {
   return mods.length > 0 ? mods.join('+') : 'none'
 }
 
+/**
+ * trigger_modsビットマスクからKanata修飾キー名の組み合わせリストを返す。
+ * 左右ペアが両方指定されている場合、それぞれ個別エントリに展開する。
+ * 例: modBits=3 (LCtrl+LShift) → [['lctl', 'lsft']]
+ * 例: modBits=34 (LShift+RShift) → [['lsft'], ['rsft']]
+ */
+function expandTriggerMods(modBits) {
+  if (modBits === 0) return [[]]
+
+  // 各ビットを個別のmod名に分解
+  const allMods = []
+  for (const [bit, name] of Object.entries(TRIGGER_MOD_TO_KANATA)) {
+    if (modBits & parseInt(bit, 10)) {
+      allMods.push({ bit: parseInt(bit, 10), name })
+    }
+  }
+
+  // 左右ペアの展開が必要かチェック
+  // 左右両方あるペアを見つけ、それぞれの組み合わせに展開
+  const pairsToExpand = []
+  const fixedMods = []
+
+  for (const mod of allMods) {
+    let isPaired = false
+    for (const [leftBit, rightBit] of MOD_LR_PAIRS) {
+      if ((mod.bit === leftBit || mod.bit === rightBit) &&
+          (modBits & leftBit) && (modBits & rightBit)) {
+        // この左右ペアは展開対象
+        if (mod.bit === leftBit) {
+          pairsToExpand.push([
+            TRIGGER_MOD_TO_KANATA[leftBit],
+            TRIGGER_MOD_TO_KANATA[rightBit],
+          ])
+        }
+        isPaired = true
+        break
+      }
+    }
+    if (!isPaired) {
+      fixedMods.push(mod.name)
+    }
+  }
+
+  if (pairsToExpand.length === 0) {
+    return [allMods.map((m) => m.name)]
+  }
+
+  // 左右ペアの直積展開
+  let combos = [fixedMods]
+  for (const pair of pairsToExpand) {
+    const newCombos = []
+    for (const combo of combos) {
+      for (const mod of pair) {
+        newCombos.push([...combo, mod])
+      }
+    }
+    combos = newCombos
+  }
+  return combos
+}
+
+/**
+ * QMKのreplacement文字列をKanataのキー名リストに変換
+ * 基本キー: KC_1 → ['1']
+ * 修飾付き: RSFT(KC_3) → ['rsft', '3'], C_S(KC_V) → ['lctl', 'lsft', 'v']
+ */
+function convertReplacementToKanata(qmkStr) {
+  if (!qmkStr || qmkStr === 'KC_NO') return null
+
+  // 基本キーコード
+  if (BASIC_KEYCODE_MAP[qmkStr] !== undefined) {
+    return [BASIC_KEYCODE_MAP[qmkStr]]
+  }
+
+  // 修飾付きキーコード
+  const modified = parseModified(qmkStr)
+  if (modified) {
+    // modified.prefix は 'S-', 'C-S-' などの形式
+    // modified.key は Kanataキー名文字列 or { type: 'modified', ... }
+    const mods = parseKanataPrefixToMods(modified.prefix)
+    const key = typeof modified.key === 'string' ? modified.key : 'XX'
+    return [...mods, key]
+  }
+
+  return null
+}
+
+/**
+ * Kanata修飾プレフィックス ('S-', 'C-S-' 等) を修飾キー名配列に変換
+ */
+function parseKanataPrefixToMods(prefix) {
+  const modMap = {
+    'S-': 'lsft', 'RS-': 'rsft',
+    'C-': 'lctl', 'RC-': 'rctl',
+    'A-': 'lalt', 'RA-': 'ralt',
+    'M-': 'lmet', 'RM-': 'rmet',
+  }
+  const mods = []
+  let remaining = prefix
+  while (remaining.length > 0) {
+    let matched = false
+    // 長いプレフィックスから先にマッチ
+    for (const [pfx, mod] of Object.entries(modMap).sort((a, b) => b[0].length - a[0].length)) {
+      if (remaining.startsWith(pfx)) {
+        mods.push(mod)
+        remaining = remaining.slice(pfx.length)
+        matched = true
+        break
+      }
+    }
+    if (!matched) break
+  }
+  return mods
+}
+
+/**
+ * QMKのtriggerキーコードをKanata物理キー名に変換（defsrcで使えるキー名）
+ */
+function convertTriggerToKanata(qmkStr) {
+  if (!qmkStr || qmkStr === 'KC_NO') return null
+  return extractDefsrcKey(qmkStr)
+}
+
+/**
+ * キーオーバーライドを defoverrides エントリに変換
+ * 返却: { entries: [{trigger: "lsft ,", replacement: "1", comment: "..."}, ...] } | null
+ */
 function convertKeyOverride(ko) {
-  const trigger = ko.trigger || 'KC_NO'
-  const replacement = ko.replacement || 'KC_NO'
-  const triggerMods = describeTriggerMods(ko.trigger_mods || 0)
+  const triggerQmk = ko.trigger || 'KC_NO'
+  const replacementQmk = ko.replacement || 'KC_NO'
+  const modBits = ko.trigger_mods || 0
 
-  if (trigger === 'KC_NO' && replacement === 'KC_NO') return null
+  if (triggerQmk === 'KC_NO' && replacementQmk === 'KC_NO') return null
 
-  return `;; trigger=${trigger} + ${triggerMods} → replacement=${replacement}`
+  const triggerKey = convertTriggerToKanata(triggerQmk)
+  if (!triggerKey || triggerKey === 'XX') return null
+
+  const replacementKeys = convertReplacementToKanata(replacementQmk)
+  if (!replacementKeys) return null
+
+  const modCombos = expandTriggerMods(modBits)
+  const triggerModsDesc = describeTriggerMods(modBits)
+  const comment = `${triggerQmk} + ${triggerModsDesc} → ${replacementQmk}`
+
+  const entries = modCombos.map((mods) => ({
+    trigger: [...mods, triggerKey].join(' '),
+    replacement: replacementKeys.join(' '),
+    comment,
+  }))
+
+  return { entries }
 }
 
 // ============================================================
@@ -1536,9 +1693,10 @@ function generateKanataConfig(vilData, inputFileName, firmwareCtx) {
   // --------------------------------------------------------
   // 5. キーオーバーライド変換（コメント）
   // --------------------------------------------------------
-  const koComments = keyOverrides
+  const koResults = keyOverrides
     .map(convertKeyOverride)
     .filter(Boolean)
+  const koEntries = koResults.flatMap((r) => r.entries)
 
   // --------------------------------------------------------
   // 出力組み立て
@@ -1659,15 +1817,21 @@ function generateKanataConfig(vilData, inputFileName, firmwareCtx) {
     lines.push('')
   }
 
-  // キーオーバーライド（コメント）
-  if (koComments.length > 0) {
+  // キーオーバーライド（defoverrides）
+  if (koEntries.length > 0) {
     lines.push(';; ============================================================')
-    lines.push(';; Key Overrides (QMK機能 - Kanataでは直接対応なし)')
-    lines.push(';; 以下は参考情報です。必要に応じてfork/switchで実装してください。')
+    lines.push(';; Key Overrides')
     lines.push(';; ============================================================')
-    for (const comment of koComments) {
-      lines.push(comment)
+    lines.push('(defoverrides')
+    const seenComments = new Set()
+    for (const entry of koEntries) {
+      if (!seenComments.has(entry.comment)) {
+        lines.push(`  ;; ${entry.comment}`)
+        seenComments.add(entry.comment)
+      }
+      lines.push(`  (${entry.trigger}) (${entry.replacement})`)
     }
+    lines.push(')')
     lines.push('')
   }
 
