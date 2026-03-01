@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>vil2kanata GUI - キーマップエディタ</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ヘッダー -->
+  <header class="header">
+    <span class="header-title">vil2kanata GUI</span>
+    <div class="header-controls">
+      <button id="btn-export-kbd" class="btn-primary" title=".kbdファイルをエクスポート">
+        .kbd エクスポート
+      </button>
+
+      <button id="btn-save-project" title="プロジェクトを保存">
+        保存
+      </button>
+
+      <button id="btn-load-project" title="プロジェクトを読み込み">
+        読込
+      </button>
+    </div>
+  </header>
+
+  <!-- 非表示のファイル入力 -->
+  <input type="file" id="file-input-vil" class="hidden" accept=".vil,.json">
+  <input type="file" id="file-input-project" class="hidden" accept=".json">
+
+  <!-- メイン -->
+  <div class="main-container">
+
+    <!-- defsrcサイドパネル -->
+    <div id="defsrc-panel" class="defsrc-panel">
+      <div class="defsrc-section-label">src レイアウト</div>
+      <select id="layout-select" class="defsrc-select" title="ベースレイアウト"></select>
+      <div class="defsrc-section-label">キー表示</div>
+      <div class="defsrc-btn-row">
+        <button id="btn-label-us" class="defsrc-btn defsrc-btn-sm defsrc-btn-active">US</button>
+        <button id="btn-label-jis" class="defsrc-btn defsrc-btn-sm">JIS</button>
+      </div>
+      <button id="btn-import-vil" class="defsrc-btn" title=".vilファイルをインポート">
+        .vil インポート
+      </button>
+
+      <!-- レイアウト編集パネル（srcモード時のみ表示） -->
+      <div id="layout-edit-panel" style="display:none; flex-direction:column; gap:6px;">
+        <div class="defsrc-section-label">キー追加</div>
+        <input type="text" id="new-key-kanata" placeholder="kanataKey例: fn" class="defsrc-input">
+        <input type="text" id="new-key-label" placeholder="ラベル(省略可)" class="defsrc-input">
+        <div class="defsrc-edit-row">
+          <label class="defsrc-mini-label">行:</label>
+          <select id="new-key-row" class="defsrc-select-sm"></select>
+        </div>
+        <div class="defsrc-edit-row">
+          <label class="defsrc-mini-label">幅:</label>
+          <input type="number" id="new-key-width" value="1" min="0.5" max="7" step="0.25" class="defsrc-input-num">
+        </div>
+        <button id="btn-add-layout-key" class="defsrc-btn">＋ 追加</button>
+      </div>
+
+      <div class="defsrc-divider"></div>
+
+      <div class="defsrc-section-label">リマップキー</div>
+      <div id="defsrc-count" class="defsrc-count">0 / 0 キー</div>
+      <div id="defsrc-match" class="defsrc-match" style="display:none"></div>
+      <div class="defsrc-btn-row">
+        <button id="btn-defsrc-all" class="defsrc-btn defsrc-btn-sm">全選択</button>
+        <button id="btn-defsrc-clear" class="defsrc-btn defsrc-btn-sm">全解除</button>
+      </div>
+      <div id="defsrc-hint" class="defsrc-hint">左クリック: キー設定<br>Shift+クリック / 右クリック: defsrc切替<br>ドラッグ&ドロップ: キー入替</div>
+    </div>
+
+    <!-- コンテンツエリア -->
+    <div class="content-area">
+
+      <!-- キーボードビジュアライザ（物理 + VILソース横並び） -->
+      <div class="keyboard-area">
+        <div class="keyboard-pane">
+          <div class="keyboard-pane-label">物理配列 (ノートPC)</div>
+          <div id="keyboard-container"></div>
+        </div>
+        <div class="keyboard-pane" id="vil-keyboard-pane" style="display:none">
+          <div class="keyboard-pane-label">VIL ソース配列 (自作KB)</div>
+          <div id="vil-keyboard-container"></div>
+        </div>
+      </div>
+
+      <!-- 下部エリア -->
+      <div class="bottom-area">
+
+        <!-- レイヤータブ -->
+        <div class="layer-tabs-container" id="layer-tabs"></div>
+
+        <!-- 機能タブ -->
+        <div class="feature-tabs-container" id="feature-tabs">
+          <button class="feature-tab feature-tab-active" data-tab="keymap">キー設定</button>
+          <button class="feature-tab" data-tab="macros">マクロ <span class="feature-tab-badge" id="badge-macros"></span></button>
+          <button class="feature-tab" data-tab="tap-dance">タップダンス <span class="feature-tab-badge" id="badge-tap-dance"></span></button>
+          <button class="feature-tab" data-tab="combos">コンボ <span class="feature-tab-badge" id="badge-combos"></span></button>
+          <button class="feature-tab" data-tab="overrides">オーバーライド <span class="feature-tab-badge" id="badge-overrides"></span></button>
+        </div>
+
+        <!-- エディタパネル（キー設定タブ） -->
+        <div id="editor-panel"></div>
+
+        <!-- 機能パネル（マクロ/コンボ/オーバーライドタブ） -->
+        <div id="feature-panel" style="display:none"></div>
+
+      </div>
+
+      <!-- 設定バー -->
+      <div class="settings-bar">
+        <label>
+          Tap Time (ms):
+          <input type="number" id="tap-time" value="200" min="50" max="1000" step="10">
+        </label>
+        <label>
+          Hold Time (ms):
+          <input type="number" id="hold-time" value="200" min="50" max="1000" step="10">
+        </label>
+        <label class="settings-checkbox">
+          <input type="checkbox" id="cfg-process-unmapped" checked>
+          process-unmapped-keys
+        </label>
+        <label class="settings-checkbox">
+          <input type="checkbox" id="cfg-concurrent-tap-hold" checked>
+          concurrent-tap-hold
+        </label>
+        <label>
+          rapid-event-delay (ms):
+          <input type="number" id="cfg-rapid-event-delay" value="5" min="0" max="100" step="1">
+        </label>
+      </div>
+
+    </div>
+
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

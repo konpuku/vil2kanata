@@ -1,2 +1,8 @@
 node_modules/
 *.kbd
+kanata-windows-binaries-*/
+.claude/
+nul
+NextStep.md
+error.md
+test_firmware/
