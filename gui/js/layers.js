@@ -1,90 +1,42 @@
 // ============================================================
-// レイヤー管理UI
+// レイヤータブ
 // ============================================================
 
-let callbacks = {
-  setActiveLayer: null,
-  addLayer: null,
-  removeLayer: null,
-  renameLayer: null,
-  enterSrcMode: null,
-}
+import { el } from './pickers.js'
 
-export function setLayerCallbacks(cbs) {
-  callbacks = { ...callbacks, ...cbs }
-}
-
-export function renderLayers(state) {
+export function renderLayers(state, resolved, actions) {
   const container = document.getElementById('layer-tabs')
   if (!container) return
-
   container.innerHTML = ''
+  const sourceLayers = state.project.source?.layers.length || 0
 
-  const { layers, activeLayer, layoutEditMode } = state
-
-  // srcタブ（物理キー設定）
-  const srcTab = document.createElement('div')
-  srcTab.className = 'layer-tab layer-tab-src'
-  if (layoutEditMode) srcTab.classList.add('layer-tab-active')
-
-  const srcName = document.createElement('span')
-  srcName.className = 'layer-tab-name'
-  srcName.textContent = 'src'
-  srcTab.appendChild(srcName)
-
-  srcTab.addEventListener('click', () => {
-    if (callbacks.enterSrcMode) callbacks.enterSrcMode()
-  })
-  container.appendChild(srcTab)
-
-  // 通常レイヤータブ
-  for (let i = 0; i < layers.length; i++) {
-    const tab = document.createElement('div')
-    tab.className = 'layer-tab'
-    if (!layoutEditMode && i === activeLayer) tab.classList.add('layer-tab-active')
-
-    const nameSpan = document.createElement('span')
-    nameSpan.className = 'layer-tab-name'
-    nameSpan.textContent = layers[i].name
-    nameSpan.addEventListener('dblclick', () => {
-      const newName = prompt('レイヤー名:', layers[i].name)
-      if (newName && newName.trim()) {
-        const sanitized = newName.trim().replace(/[^a-zA-Z0-9_-]/g, '')
-        if (sanitized.length > 0 && sanitized.length <= 30 && callbacks.renameLayer) {
-          callbacks.renameLayer(i, sanitized)
-        }
-      }
+  resolved.layers.forEach((layer, i) => {
+    const name = el('span', { class: 'layer-tab-name', text: `${i}: ${layer.name}` })
+    name.addEventListener('dblclick', () => {
+      const v = prompt('レイヤー名 (英数字・_・-):', layer.name)
+      if (!v) return
+      const sanitized = v.trim().replace(/[^a-zA-Z0-9_-]/g, '')
+      if (sanitized && sanitized.length <= 30) actions.renameLayer(i, sanitized)
     })
-
-    tab.appendChild(nameSpan)
-
-    if (i > 0) {
-      const removeBtn = document.createElement('button')
-      removeBtn.className = 'layer-tab-remove'
-      removeBtn.textContent = '\u00d7'
-      removeBtn.title = 'レイヤーを削除'
-      removeBtn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        if (confirm(`レイヤー "${layers[i].name}" を削除しますか？`) && callbacks.removeLayer) {
-          callbacks.removeLayer(i)
-        }
-      })
-      tab.appendChild(removeBtn)
+    const tab = el('div', {
+      class: `layer-tab${i === state.activeLayer ? ' layer-tab-active' : ''}`,
+      title: 'ダブルクリックで名前を変更',
+      onclick: () => actions.setActiveLayer(i),
+    }, [name])
+    const edits = Object.keys(state.project.edits?.[i] || {}).length
+    if (edits) tab.appendChild(el('span', { class: 'feature-tab-badge', title: '手動変更したキーの数', text: String(edits) }))
+    if (i > 0 && i >= sourceLayers && i === resolved.layers.length - 1) {
+      tab.appendChild(el('button', {
+        class: 'layer-tab-remove',
+        title: 'レイヤーを削除',
+        text: '×',
+        onclick: (e) => {
+          e.stopPropagation()
+          if (confirm(`レイヤー "${layer.name}" を削除しますか？`)) actions.removeLastLayer()
+        },
+      }))
     }
-
-    tab.addEventListener('click', () => {
-      if (callbacks.setActiveLayer) callbacks.setActiveLayer(i)
-    })
     container.appendChild(tab)
-  }
-
-  const addBtn = document.createElement('div')
-  addBtn.className = 'layer-tab layer-tab-add'
-  addBtn.textContent = '+'
-  addBtn.title = 'レイヤーを追加'
-  addBtn.addEventListener('click', () => {
-    const name = `layer${layers.length}`
-    if (callbacks.addLayer) callbacks.addLayer(name)
   })
-  container.appendChild(addBtn)
+  container.appendChild(el('div', { class: 'layer-tab layer-tab-add', title: 'レイヤーを追加', text: '+', onclick: actions.addLayer }))
 }

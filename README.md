@@ -1,206 +1,136 @@
 # vil2kanata
 
-Vial (.vil) の設定ファイルを Kanata (.kbd) の設定ファイルに変換するツール。CLI とブラウザ GUI の2つのモードで利用できます。
+Vial (.vil) の設定を、ソフトウェアキーリマッパー [Kanata](https://github.com/jtroo/kanata) の設定ファイル (.kbd) に変換するツールです。
+自作キーボード (Vial 対応) で使っているキーマップ・マクロ・タップダンス・コンボ・QMK 設定を、ノートPC のキーボードでそのまま使えるようにします。
 
-外付けキーボード (Vial対応) の設定を、ソフトウェアキーリマッパー [Kanata](https://github.com/jtroo/kanata) に移植する用途を想定しています。
+- **ブラウザ GUI** (`gui/index.html`): 対応付けを見ながら調整・編集できます (推奨)
+- **CLI** (`vil2kanata.js`): 同じ変換ロジックをコマンドラインから使えます
 
----
-
-## GUI エディタ (推奨)
-
-ブラウザ上で動作するビジュアルキーマップエディタです。ノート PC のキーボード上で、Kanata の設定ファイル (.kbd) をゼロから作成できます。Vial (.vil) のインポートにも対応しています。
-
-### 起動方法
-
-`gui/index.html` をブラウザで直接開くだけで使えます。インストールやビルドは不要です。
-
-```
-gui/index.html をダブルクリック、またはブラウザにドラッグ&ドロップ
-```
-
-> **開発者向け**: `gui/js/*.js` を編集した場合は `node build.js` でバンドルを再生成してください。
-
-### 画面構成
-
-```
-┌─────────────────────────────────────────────────┐
-│ vil2kanata GUI          [.kbdエクスポート] [保存] [読込] │
-├──────┬──────────────────────────────────────────┤
-│      │  キーボードビジュアライザ                          │
-│  左  │  (物理配列 + VILソース配列)                      │
-│  パ  │                                                │
-│  ネ  ├──────────────────────────────────────────┤
-│  ル  │  [src] [base] [layer1] [layer2] ... [+]       │
-│      ├──────────────────────────────────────────┤
-│      │  [キー設定] [マクロ] [タップダンス] [コンボ] [オーバーライド]│
-│      ├──────────────────────────────────────────┤
-│      │  エディタ / 機能パネル                            │
-│      ├──────────────────────────────────────────┤
-│      │  設定バー (tap-time, hold-time, defcfg)         │
-└──────┴──────────────────────────────────────────┘
-```
-
-### 基本的なワークフロー
-
-#### 1. ベースレイアウトを選ぶ
-
-左パネルのドロップダウンから物理キーボードのレイアウトを選択します。
-
-| プリセット | 対象 |
-|-----------|------|
-| US ANSI 60% | 60% キーボード (US配列) |
-| US ANSI Fn Row | ファンクションキー行あり |
-| US ANSI TKL | テンキーレス |
-| JIS 60% | 60% キーボード (JIS配列) |
-
-#### 2. src タブで物理キーを設定する
-
-レイヤータブの先頭にある **src** タブが物理キーの定義 (defsrc) です。
-
-- クリックでキーを選択 → 右側エディタで物理キー名を変更
-- ノート PC のキーボードに合わせてキーの追加・削除ができます
-- 右クリックでキーを削除
-
-#### 3. base / layer タブでキーマップを設定する
-
-base タブ以降が各レイヤーのキーマップです。
-
-- キーをクリックして選択
-- **キー設定** パネルでキーの種類を選択:
-
-| 種類 | 説明 | 例 |
-|------|------|----|
-| 基本キー | 単一キー | `A`, `Enter`, `Space` |
-| 修飾付き | Shift/Ctrl等 + キー | `S-9` → `(` |
-| Mod-Tap | タップとホールドで別の動作 | タップ: `A` / ホールド: `LCtrl` |
-| Layer-Tap | タップでキー、ホールドでレイヤー切替 | タップ: `Space` / ホールド: `layer1` |
-| レイヤー操作 | レイヤー切替 | `MO(1)`, `TO(2)` |
-| マクロ | マクロ呼び出し | `M0`, `M1` |
-| タップダンス | タップダンス呼び出し | `TD0`, `TD1` |
-| 透過 | 下位レイヤーのキーを引き継ぐ | `▽` |
-
-- 各キーの右下に薄く表示されるサブラベルが、物理キー名 (src) です
-- ドラッグ&ドロップでキーの位置を入れ替えられます
-
-#### 4. 機能を追加する
-
-キー設定タブの隣にある各タブで、追加機能を設定できます。
-
-**マクロ** — キーの連続入力やテキスト入力を自動化
-- タップ (単一キー送信)、テキスト (文字列入力)、ディレイ (待機) を組み合わせ
-
-**タップダンス** — タップ回数で異なるキーを発動
-- 例: 1回タップ → `a`、2回タップ → `Esc`
-
-**コンボ** — 複数キーの同時押しで別のキーを発動
-- トリガーキーは base レイヤーの設定で表示されます
-- エクスポート時に自動的に物理キー (defsrc) に変換されます
-- 例: `無変換` + `変換` 同時押し → `IME OFF`
-
-**オーバーライド** — 特定のキー + 修飾キーの組み合わせを別のキーに置換
-
-#### 5. エクスポート
-
-ヘッダーの **「.kbd エクスポート」** ボタンで Kanata 設定ファイルをダウンロードできます。
-
-### Windows での IME 制御
-
-日本語 IME の ON/OFF には、キーピッカーから以下を選択してください。
-
-| キー名 | 機能 | 出力 |
-|--------|------|------|
-| `lang1` | IME ON | `(arbitrary-code 242)` VK_DBE_HIRAGANA |
-| `lang2` | IME OFF | `(arbitrary-code 26)` VK_IME_OFF |
-
-`kana` キーは Windows では韓国語 IME (VK_KANA) にマッピングされるため、日本語 IME の切替には使えません。
-
-### プロジェクトの保存と読込
-
-- **保存**: 現在の設定を JSON ファイルとして保存
-- **読込**: 保存した JSON ファイルを読み込んで編集を再開
-
-### .vil ファイルのインポート
-
-左パネルの **「.vil インポート」** ボタンで、Vial からエクスポートした .vil ファイルを読み込めます。VIL のキーマップがインポートされ、ソース配列がキーボード右側に表示されます。
-
-### キー表示モード
-
-左パネルの **US / JIS** ボタンで、キーラベルの表示を切り替えられます。
-
-| モード | 表示例 |
-|--------|--------|
-| US | `[` `]` `\` `;` `'` `` ` `` |
-| JIS | `@` `[` `]` `:` `*` `半/全` |
-
-### 色覚異常対応 (Color Universal Design)
-
-キータイプの識別に色だけでなくボーダー形状も使用しています。
-
-| キータイプ | 色 | ボーダー |
-|-----------|-----|---------|
-| レイヤー操作 | 紫系 | 左に太線 |
-| マクロ | 緑青 | 上に太線 |
-| タップダンス | オレンジ茶 | 点線 |
-| Mod-Tap / Layer-Tap | 青系 | (上下分割表示) |
+GUI と CLI は同じ変換コア (`src/core/`) を使っているため、出力結果は同一です。
 
 ---
 
-## CLI (コマンドライン)
+## GUI エディタ
 
-.vil ファイルを直接 .kbd に変換する Node.js スクリプトです。
+`gui/index.html` をブラウザで開くだけで使えます (インストール不要)。
 
-### 必要なもの
+### 作業の流れ
 
-- [Node.js](https://nodejs.org/) (LTS 推奨)
+#### ① 対応付け — 「始点を答える」だけで全キーを割り当て
 
-### 使い方
+1. **ノートPCの配列を選ぶ** — `JIS ノートPC (Fn・矢印付き)` など。手元と違うキーは左パネルの「ノートPC配列を編集」で追加・削除・名前変更できます。
+2. **自作キーボードの設定を読み込む** — `.vil` を選択します。
+   `vial.json` (キーボード定義) を一緒に選ぶと、分割キーボードの左右や親指キーを**実際の形**で扱えます。
+   `keymap.c` / `config.h` も一緒に選ぶと、USER キーコードの動作や TAPPING_TERM 等も取り込みます。
+3. **各行の始点を確認する (ヒアリング)** — 自作キーボードの各行 (分割キーボードは左右別) について、
+   「先頭のキーはノートPCのどのキーか」を答えます。
+   - キー名が一致する行 (`Q` ↔ `Q` など) は**自動で推定済み**です
+   - 名前で決まらない行 (親指キー等) は近くの行から推定されます
+   - 違っていればプルダウンで選ぶか、「キーで指定」を押してノートPCのキーをクリックします
+   - 始点が決まると、残りのキーは右方向へ順番に割り当てられます
+4. **個別に微調整する** — 自作キーボードのキーをクリック → ノートPCのキーをクリック (またはドラッグ&ドロップ) で割り当て。
+   割り当て先に別のキーがあれば入れ替わります。右クリックで割り当て解除。
+
+対応付けは**全レイヤー共通**です。一度合わせれば、すべてのレイヤーに反映されます。
+
+#### ② キーマップ編集
+
+- レイヤータブで切り替え、ノートPCのキーをクリックすると動作を編集できます
+  (編集したキーは左上にオレンジの点。「手動変更を取り消す」で対応付けの値に戻ります)
+- Shift+クリック / 右クリックで「リマップ対象 (defsrc) に含めるか」を切り替え
+- 機能タブ: マクロ / タップダンス / コンボ / オーバーライド (+ Alt Repeat Key) / **Vial設定** / **出力プレビュー**
+
+#### 保存・エクスポート
+
+- **.kbd エクスポート**: Kanata の設定ファイルをダウンロード
+- **保存 / 読込**: プロジェクト (対応付け・手動変更・設定) を JSON で保存。旧バージョンで保存したファイルも読み込めます
+- 作業内容はブラウザに自動保存され、次回開いたときに復元されます
+
+---
+
+## Vial 機能の再現
+
+| Vial / QMK | Kanata での再現 |
+|---|---|
+| 基本キー・修飾付きキー (`LSFT(KC_1)`, `C_S(KC_V)`, `KC_EXLM` 等) | キー名 / 出力チョード (`S-1`, `C-S-v`) |
+| Mod-Tap (`LCTL_T`, `MEH_T`, `MT(...)` 等、複数修飾も可) | `tap-hold` 系 (修飾が複数なら `multi`) |
+| Layer-Tap (`LT1(kc)`, `LT(1, kc)`) | `tap-hold` 系 + `layer-while-held` |
+| `MO` / `TO` / `TG` / `DF` / `OSL` / `TT` / `LM` / `OSM` | `layer-while-held` / `layer-switch` (TG・TT は対象レイヤー上で解除) / `one-shot` 等 |
+| **Tapping Term / Quick Tap Term** | `hold-time` / `tap-time` |
+| **Permissive Hold / Hold On Other Key Press** | `tap-hold-release` / `tap-hold-press` |
+| **Chordal Hold** | 同じ手のキーを列挙した `tap-hold-release-keys` |
+| マクロ (tap / down / up / text / delay) | `macro` (down〜up の修飾はチョード化、数字は `Digit1` 形式、遅延は数値) |
+| タップダンス (タップ / ホールド / ダブルタップ / タップ後ホールド / 個別 Tapping term) | `tap-dance` + `tap-hold` |
+| コンボ (**COMBO_TERM**、出力は任意のキーコード) | `defchordsv2` (構成キーが同じ動作にならないレイヤーでは無効化) |
+| キーオーバーライド (有効/無効、左右修飾、one mod) | `defoverrides` |
+| Alt Repeat Key / Repeat Key | `switch` + `key-history` / `rpt-any` |
+| Grave Escape (+ Override 設定) / Space Cadet / `KC_SFTENT` | `switch` / `tap-hold-press` |
+| Caps Word | `caps-word-toggle` |
+| **One Shot Keys タイムアウト** / **Tapping Toggle** | `one-shot-press` のタイムアウト / `TT` のタップ回数 |
+| **Auto Shift** (タイムアウト、英字/数字/記号の除外) | 対象キーを `tap-hold` (ホールドで Shift) に置き換え |
+| **Magic** (Caps⇔Ctrl、Alt⇔GUI、GUI 無効 等) | キーマップ上のキーを入れ替えて出力 |
+| **Mouse keys** (間隔・移動量・最大速度・加速時間・ホイール間隔) | `movemouse-accel-*` / `mwheel-*` / `movemouse-speed` |
+| USER キーコード (keymap.c がある場合) | `process_record_user` を解析して `tap-hold-release` 等で近似 |
+| レイアウトオプション (vial.json の labels) | `.vil` の `layout_options` に従ってキーを選択 |
+
+Kanata v1.10 で**再現できない項目**は、出力ファイル先頭のコメントと GUI の「出力プレビュー」に一覧表示されます
+(例: Retro Tapping、Flow Tap、キーオーバーライドのレイヤー限定・Negative mods、エンコーダー、ブートローダー等の本体機能)。
+
+### OS ごとの違い
+
+「Vial設定」タブ (CLI は `--os`) で出力先 OS を選べます。
+
+| キー | Windows | Linux | macOS |
+|---|---|---|---|
+| `KC_LANG1` (IME ON) | `(arbitrary-code 242)` VK_DBE_HIRAGANA | `deflocalkeys-linux` (122) | `kana` |
+| `KC_LANG2` (IME OFF) | `(arbitrary-code 26)` VK_IME_OFF | `deflocalkeys-linux` (123) | `eisu` |
+| `KC_RO` (ろ) | `ro` | `deflocalkeys-linux` (89) | `ro` |
+
+`KC_KANA` は Windows では韓国語 IME 用の VK_KANA になるため、日本語 IME の ON/OFF には `KC_LANG1` / `KC_LANG2` を使ってください。
+
+### マクロの文字入力 (text アクション)
+
+- **JIS** (既定): OS が JIS 配列のとき、その文字がそのまま入力されるキーに変換します (`@` → `[` の位置のキー)
+- **US**: QMK の `send_string` と同じ (US 配列のキーコード)。自作キーボードで実際に入力されていた文字と同じになります
+
+---
+
+## CLI
+
+[Node.js](https://nodejs.org/) (v18 以降) が必要です。
 
 ```bash
-node vil2kanata.js <input.vil> [--output output.kbd]
+# ノートPC配列を指定して自動で対応付け (推奨)
+node vil2kanata.js my.vil -t jis-laptop -o keymap.kbd
+
+# vial.json / keymap.c / config.h のあるフォルダも読み込む
+node vil2kanata.js my.vil -t jis-laptop -f path/to/keymaps/vial -o keymap.kbd
+
+# 対応付けの行セグメントと推定された始点を確認 (ヒアリング用)
+node vil2kanata.js my.vil -t jis-laptop -f path/to/keymaps/vial --list-segments
+
+# 始点を指定 (右手親指の先頭キーを「変換」キーへ)
+node vil2kanata.js my.vil -t jis-laptop --start r3s1=henk -o keymap.kbd
+
+# GUI で保存したプロジェクトを使う (対応付け・手動変更を反映)
+node vil2kanata.js --project vil2kanata-project.json -o keymap.kbd
 ```
 
 | オプション | 説明 |
 |---|---|
-| `<input.vil>` | 変換元の Vial 設定ファイル (必須) |
-| `--output`, `-o` | 出力先のファイルパス。省略時は標準出力 |
-| `--help`, `-h` | ヘルプを表示 |
-
-### CLI での出力後の手動調整
-
-CLI による変換結果はそのままでは動作しない場合があります。
-
-- **defsrc の書き換え**: ベースレイヤーのキー名から自動生成されますが、物理キーボードに合わせて修正が必要です
-- **USER キーコード**: `USER01` 等はプレースホルダー (`f14` 等) に変換されます
-- **キーオーバーライド**: QMK の Key Override は Kanata に直接対応がないため、コメントとして出力されます
-
-> CLI での手動調整が面倒な場合は、GUI エディタの使用を推奨します。
+| `-o, --output FILE` | 出力ファイル (省略時は標準出力) |
+| `-t, --target PRESET` | ノートPC配列: `jis-laptop`, `jis-60`, `us-ansi-60`, `us-ansi-fn`, `us-ansi-tkl`。省略時は自作キーボードの配列をそのまま defsrc にします |
+| `-s, --start SEG=KEY` | 行セグメントの始点 (複数可)。`KEY` はノートPC側の kanata キー名、`none` で割り当てなし |
+| `-p, --project FILE` | GUI のプロジェクトファイル |
+| `-f, --firmware-dir DIR` | `vial.json` / `keymap.c` / `config.h` を読むフォルダ |
+| `--vial-json`, `--keymap-c`, `--config-h` | 個別に指定 |
+| `--os windows\|linux\|macos` | 出力先 OS (既定: windows) |
+| `--text-layout jis\|us` | マクロの文字入力方式 (既定: jis) |
+| `--list-segments` | セグメント一覧を表示して終了 |
 
 ---
 
-## 変換対象
+## 動作確認
 
-| Vial (.vil) | Kanata (.kbd) |
-|---|---|
-| 基本キーコード (`KC_A` 等) | Kanata キー名 (`a`) |
-| Mod-Tap (`LGUI_T(KC_A)`) | `(tap-hold-release 200 200 a lmet)` |
-| Layer-Tap (`LT1(KC_BSPACE)`) | `(tap-hold-release 200 200 bspc (layer-toggle layer1))` |
-| 修飾付きキー (`LSFT(KC_8)`) | `S-8` |
-| レイヤー操作 (`MO(n)`, `TO(n)` 等) | `(layer-toggle ...)` / `(layer-switch ...)` |
-| マクロ | `(macro ...)` |
-| タップダンス | `(tap-dance ...)` |
-| コンボ | `(defchordsv2 ...)` |
-| キーオーバーライド | `(defoverrides ...)` (GUI) / コメント (CLI) |
-| マウスキー | `mlft`, `mrgt`, `mmid` 等 |
-| 日本語キー | `ro`, `kana`, `mhnk`, `henk` 等 |
-| IME ON/OFF (Windows) | `(arbitrary-code 242)` / `(arbitrary-code 26)` |
-
-## 動作確認済み環境
-
-- Vial Protocol v6 / VIA Protocol v9
-- Kanata v1.10.1
-- Windows 11
-- Chrome / Edge (GUI)
-
-## ライセンス
-
-MIT
+- 出力は Kanata v1.10.1 の `kanata --check` で構文検証しています (`npm test`)
+- Vial Protocol v6 / VIA Protocol v9 の `.vil`

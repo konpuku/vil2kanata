@@ -1,258 +1,114 @@
 // ============================================================
-// コンボ管理パネル
+// コンボパネル
+// Vial と同じく「キーコード」で構成キーを指定する。
+// 出力時にそのキーコードが割り当てられた位置 (defsrc) を探して defchordsv2 にする。
 // ============================================================
 
-import { getKeyLabel, getModifiedKeyLabel, getAllBasicKeys } from './converter.js'
+import { keyConfigId } from '../../src/core/qmk.mjs'
+import { el, keyConfigEditor } from './pickers.js'
+import { keyConfigLabel } from './labels.js'
 
-let cachedBasicKeys = null
-
-function getBasicKeys() {
-  if (!cachedBasicKeys) cachedBasicKeys = getAllBasicKeys()
-  return cachedBasicKeys
-}
-
-// baseレイヤーのキー割当からセレクト用リストを生成
-function getBaseLayerKeys(state, keyLabelMode) {
-  const { physicalLayout, layers, defsrcKeys } = state
-  if (!physicalLayout || !layers || layers.length === 0) return []
-
-  const baseKeys = layers[0].keys || []
-  const seen = new Set()
-  const result = []
-
-  for (let i = 0; i < physicalLayout.length; i++) {
-    // defsrcに含まれるキーのみ
-    if (defsrcKeys && defsrcKeys.size > 0 && !defsrcKeys.has(i)) continue
-
-    const layerKey = baseKeys[i]
-    if (!layerKey || layerKey.type === 'disabled' || layerKey.type === 'transparent') continue
-
-    const kanataKey = layerKey.kanataKey
-    if (!kanataKey || kanataKey === '_' || kanataKey === 'XX' || seen.has(kanataKey)) continue
-    seen.add(kanataKey)
-
-    let label
-    if (layerKey.type === 'modified') {
-      label = getModifiedKeyLabel(kanataKey, keyLabelMode)
-    } else {
-      label = getKeyLabel(kanataKey, keyLabelMode)
-    }
-
-    result.push({ kanataKey, label })
-  }
-
-  return result
-}
-
-function createBaseKeySelect(currentValue, baseLayerKeys) {
-  const select = document.createElement('select')
-  select.className = 'feature-key-select'
-
-  const emptyOpt = document.createElement('option')
-  emptyOpt.value = ''
-  emptyOpt.textContent = '-- キー選択 --'
-  if (!currentValue) emptyOpt.selected = true
-  select.appendChild(emptyOpt)
-
-  for (const key of baseLayerKeys) {
-    const opt = document.createElement('option')
-    opt.value = key.kanataKey
-    opt.textContent = `${key.label} (${key.kanataKey})`
-    if (key.kanataKey === currentValue) opt.selected = true
-    select.appendChild(opt)
-  }
-
-  return select
-}
-
-function createResultKeySelect(currentValue) {
-  const select = document.createElement('select')
-  select.className = 'feature-key-select'
-
-  const emptyOpt = document.createElement('option')
-  emptyOpt.value = ''
-  emptyOpt.textContent = '-- キー選択 --'
-  if (!currentValue) emptyOpt.selected = true
-  select.appendChild(emptyOpt)
-
-  for (const key of getBasicKeys()) {
-    const opt = document.createElement('option')
-    opt.value = key.kanata
-    opt.textContent = `${key.label} (${key.kanata})`
-    if (key.kanata === currentValue) opt.selected = true
-    select.appendChild(opt)
-  }
-  return select
-}
-
-export function renderCombosPanel(state, callbacks) {
+export function renderCombosPanel(state, resolved, actions) {
   const panel = document.getElementById('feature-panel')
-  if (!panel) return
-
   panel.innerHTML = ''
+  const { project, keyLabelMode: mode } = state
+  const combos = project.combos || []
+  const setCombos = (list) => actions.setList('combos', list)
+  const update = (id, patch) => setCombos(combos.map((c) => (c.id === id ? { ...c, ...patch } : c)))
+  const layerNames = resolved.layers.map((l) => l.name)
 
-  const header = document.createElement('div')
-  header.className = 'feature-panel-header'
-  const h3 = document.createElement('h3')
-  h3.textContent = 'コンボ管理'
-  const desc = document.createElement('span')
-  desc.className = 'feature-panel-desc'
-  desc.textContent = '同時押しで別のキーを発動'
-  const addBtn = document.createElement('button')
-  addBtn.className = 'feature-add-btn'
-  addBtn.textContent = '+ コンボ追加'
-  addBtn.addEventListener('click', () => callbacks.onAddCombo())
-  header.appendChild(h3)
-  header.appendChild(desc)
-  header.appendChild(addBtn)
-  panel.appendChild(header)
+  // 構成キーの候補: いずれかのレイヤーで defsrc 上に存在するキー
+  const candidates = new Map()
+  resolved.layers.forEach((layer) => {
+    for (const t of resolved.defsrc) {
+      const kc = layer.keys[t]
+      if (!kc || kc.type === 'transparent' || kc.type === 'disabled') continue
+      const id = keyConfigId(kc)
+      if (!candidates.has(id)) candidates.set(id, kc)
+    }
+  })
 
-  const combos = state.combos || []
+  panel.appendChild(el('div', { class: 'feature-panel-header' }, [
+    el('h3', { text: 'コンボ' }),
+    el('span', { class: 'feature-panel-desc', text: `同時押しで別の動作。判定時間の既定値は COMBO_TERM (${project.qmk.comboTerm}ms)` }),
+    el('button', {
+      class: 'feature-add-btn',
+      text: '+ コンボ追加',
+      onclick: () => {
+        const id = combos.length ? Math.max(...combos.map((c) => c.id)) + 1 : 0
+        const first = [...candidates.values()].slice(0, 2)
+        setCombos([...combos, { id, keys: first, result: { type: 'basic', kanataKey: 'esc' } }])
+      },
+    }),
+  ]))
   if (combos.length === 0) {
-    const empty = document.createElement('p')
-    empty.className = 'feature-empty'
-    empty.textContent = 'コンボがありません。同時押しでキーを発動させるコンボを追加してください。'
-    panel.appendChild(empty)
+    panel.appendChild(el('p', { class: 'feature-empty', text: 'コンボはありません。' }))
     return
   }
 
-  // baseレイヤーキーリストをトリガー用に生成
-  const baseLayerKeys = getBaseLayerKeys(state, state.keyLabelMode)
-
   for (const combo of combos) {
-    if (!combo || combo.id === undefined) continue
-
-    const item = document.createElement('div')
-    item.className = 'feature-item'
-
-    // ヘッダー行: ID + タイムアウト + 削除ボタン
-    const headerRow = document.createElement('div')
-    headerRow.className = 'feature-row'
-
-    const idLabel = document.createElement('span')
-    idLabel.className = 'feature-item-id'
-    idLabel.textContent = `C${combo.id}`
-    headerRow.appendChild(idLabel)
-
-    const timeoutLabel = document.createElement('span')
-    timeoutLabel.className = 'feature-unit'
-    timeoutLabel.textContent = '判定時間:'
-    headerRow.appendChild(timeoutLabel)
-
-    const timeoutInput = document.createElement('input')
-    timeoutInput.type = 'number'
-    timeoutInput.className = 'feature-number-input'
-    timeoutInput.value = combo.timeout || 200
-    timeoutInput.min = 10
-    timeoutInput.max = 2000
-    timeoutInput.title = 'タイムアウト (ms)'
-    timeoutInput.addEventListener('change', () => {
-      const val = parseInt(timeoutInput.value, 10)
-      if (!isNaN(val) && val >= 10) callbacks.onUpdateCombo(combo.id, { timeout: val })
+    const item = el('div', { class: 'feature-item' })
+    const timeout = el('input', { type: 'number', class: 'feature-number-input', value: combo.timeout || '', placeholder: String(project.qmk.comboTerm), min: 10, max: 2000 })
+    timeout.addEventListener('change', () => {
+      const v = parseInt(timeout.value, 10)
+      update(combo.id, { timeout: v > 0 ? v : undefined })
     })
-    headerRow.appendChild(timeoutInput)
+    item.appendChild(el('div', { class: 'feature-row' }, [
+      el('span', { class: 'feature-item-id', text: `C${combo.id}` }),
+      el('span', { class: 'feature-unit', text: '判定時間' }),
+      timeout,
+      el('span', { class: 'feature-unit', text: 'ms (空欄 = COMBO_TERM)' }),
+      el('button', { class: 'feature-del-btn', text: '× 削除', onclick: () => setCombos(combos.filter((c) => c.id !== combo.id)) }),
+    ]))
 
-    const msLabel = document.createElement('span')
-    msLabel.className = 'feature-unit'
-    msLabel.textContent = 'ms'
-    headerRow.appendChild(msLabel)
-
-    const delBtn = document.createElement('button')
-    delBtn.className = 'feature-del-btn'
-    delBtn.textContent = '× 削除'
-    delBtn.title = '削除'
-    delBtn.addEventListener('click', () => callbacks.onRemoveCombo(combo.id))
-    headerRow.appendChild(delBtn)
-
-    item.appendChild(headerRow)
-
-    // キー行: トリガーキー群 → 出力キー
-    const keyRow = document.createElement('div')
-    keyRow.className = 'feature-row feature-row-wrap combo-key-row'
-
-    const triggerLabel = document.createElement('span')
-    triggerLabel.className = 'feature-unit'
-    triggerLabel.textContent = '同時押し:'
-    keyRow.appendChild(triggerLabel)
-
-    // トリガーキーのセレクト群（可変）
-    const currentKeys = combo.keys || ['', '']
-    const keySelects = []
-
-    function renderKeySelects() {
-      // 既存のセレクトとボタンを削除
-      while (keyRow.children.length > 1) keyRow.removeChild(keyRow.lastChild)
-      keySelects.length = 0
-
-      for (let ki = 0; ki < currentKeys.length; ki++) {
-        const kSel = createBaseKeySelect(currentKeys[ki] || '', baseLayerKeys)
-        kSel.title = `トリガーキー${ki + 1}`
-        const kiCopy = ki
-        kSel.addEventListener('change', () => {
-          const newKeys = [...currentKeys]
-          newKeys[kiCopy] = kSel.value
-          callbacks.onUpdateCombo(combo.id, { keys: newKeys })
-        })
-        keyRow.appendChild(kSel)
-        keySelects.push(kSel)
-
-        if (ki < currentKeys.length - 1) {
-          const plus = document.createElement('span')
-          plus.className = 'feature-operator'
-          plus.textContent = '+'
-          keyRow.appendChild(plus)
+    const keyRow = el('div', { class: 'feature-row feature-row-wrap combo-key-row' }, [el('span', { class: 'feature-unit', text: '同時押し:' })])
+    combo.keys.forEach((kc, ki) => {
+      const sel = el('select', { class: 'feature-key-select' })
+      const curId = keyConfigId(kc)
+      let found = false
+      for (const [id, cand] of candidates) {
+        const opt = el('option', { value: id, text: labelOf(cand, mode, layerNames) })
+        if (id === curId) {
+          opt.selected = true
+          found = true
         }
+        sel.appendChild(opt)
       }
-
-      // キー追加ボタン（最大4キー）
-      if (currentKeys.length < 4) {
-        const addKeyBtn = document.createElement('button')
-        addKeyBtn.className = 'feature-add-action-btn'
-        addKeyBtn.textContent = '+ キー'
-        addKeyBtn.title = 'トリガーキーを追加（最大4個）'
-        addKeyBtn.addEventListener('click', () => {
-          currentKeys.push('')
-          callbacks.onUpdateCombo(combo.id, { keys: [...currentKeys] })
-          renderKeySelects()
-        })
-        keyRow.appendChild(addKeyBtn)
+      if (!found) {
+        const opt = el('option', { value: curId, text: `${labelOf(kc, mode, layerNames)} (配置なし)` })
+        opt.selected = true
+        sel.appendChild(opt)
       }
-
-      // キー削除ボタン（最低2キー）
-      if (currentKeys.length > 2) {
-        const removeKeyBtn = document.createElement('button')
-        removeKeyBtn.className = 'feature-del-btn feature-del-btn-sm'
-        removeKeyBtn.textContent = '- キー'
-        removeKeyBtn.title = '最後のトリガーキーを削除'
-        removeKeyBtn.addEventListener('click', () => {
-          currentKeys.pop()
-          callbacks.onUpdateCombo(combo.id, { keys: [...currentKeys] })
-          renderKeySelects()
-        })
-        keyRow.appendChild(removeKeyBtn)
+      sel.addEventListener('change', () => {
+        const next = candidates.get(sel.value) || kc
+        update(combo.id, { keys: combo.keys.map((k, j) => (j === ki ? next : k)) })
+      })
+      keyRow.appendChild(sel)
+      if (combo.keys.length > 2) {
+        keyRow.appendChild(el('button', { class: 'feature-del-btn-sm', text: '−', onclick: () => update(combo.id, { keys: combo.keys.filter((_, j) => j !== ki) }) }))
       }
-    }
-
-    renderKeySelects()
-    item.appendChild(keyRow)
-
-    // 出力キー行（結果は任意のキーを選べる）
-    const resultRow = document.createElement('div')
-    resultRow.className = 'feature-row'
-
-    const arrowLabel = document.createElement('span')
-    arrowLabel.className = 'feature-unit'
-    arrowLabel.textContent = '→ 出力:'
-    resultRow.appendChild(arrowLabel)
-
-    const resultSelect = createResultKeySelect(combo.result || '')
-    resultSelect.title = '出力キー'
-    resultSelect.addEventListener('change', () => {
-      callbacks.onUpdateCombo(combo.id, { result: resultSelect.value })
+      if (ki < combo.keys.length - 1) keyRow.appendChild(el('span', { class: 'feature-operator', text: '+' }))
     })
-    resultRow.appendChild(resultSelect)
-
-    item.appendChild(resultRow)
+    if (combo.keys.length < 4) {
+      keyRow.appendChild(el('button', {
+        class: 'feature-add-action-btn',
+        text: '+キー',
+        onclick: () => update(combo.id, { keys: [...combo.keys, [...candidates.values()][0] || { type: 'basic', kanataKey: 'a' }] }),
+      }))
+    }
+    item.appendChild(keyRow)
+    item.appendChild(el('div', { class: 'td-slot' }, [
+      el('span', { class: 'feature-unit td-slot-label', text: '→ 出力' }),
+      keyConfigEditor(combo.result, {
+        mode, layerNames, macros: project.macros, tapDances: project.tapDances, userKeys: project.userKeys, compact: true,
+        onChange: (kc) => update(combo.id, { result: kc || { type: 'disabled' } }),
+      }),
+    ]))
     panel.appendChild(item)
   }
+}
+
+function labelOf(kc, mode, layerNames) {
+  const l = keyConfigLabel(kc, mode, layerNames)
+  return l.sub ? `${l.main} / ${l.sub}` : l.main || '(空)'
 }

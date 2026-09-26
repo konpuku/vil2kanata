@@ -1,0 +1,12 @@
+// CLI / テスト用のまとめ (GUI は build.js で個別モジュールをバンドルする)
+export * from './keycodes.mjs'
+export * from './qmk.mjs'
+export * from './settings.mjs'
+export * from './kle.mjs'
+export * from './firmware.mjs'
+export * from './vial.mjs'
+export * from './mapping.mjs'
+export * from './layouts.mjs'
+export * from './text.mjs'
+export * from './emit.mjs'
+export * from './project.mjs'

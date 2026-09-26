@@ -1,209 +1,117 @@
 // ============================================================
-// マクロ管理パネル
+// マクロパネル (Vial と同じ tap / down / up / text / delay アクション)
 // ============================================================
 
-import { getAllBasicKeys } from './converter.js'
+import { makeModified, splitChord } from '../../src/core/qmk.mjs'
+import { el, keySelect, modCheckboxes } from './pickers.js'
 
-let cachedBasicKeys = null
+const ACTION_TYPES = [
+  ['tap', 'タップ'],
+  ['down', '押す (down)'],
+  ['up', '離す (up)'],
+  ['text', 'テキスト'],
+  ['delay', '待機 (ms)'],
+]
 
-function getBasicKeys() {
-  if (!cachedBasicKeys) cachedBasicKeys = getAllBasicKeys()
-  return cachedBasicKeys
-}
-
-function createKeySelect(currentValue) {
-  const select = document.createElement('select')
-  select.className = 'feature-key-select feature-key-select-sm'
-
-  const emptyOpt = document.createElement('option')
-  emptyOpt.value = ''
-  emptyOpt.textContent = '-- キー --'
-  if (!currentValue) emptyOpt.selected = true
-  select.appendChild(emptyOpt)
-
-  for (const key of getBasicKeys()) {
-    const opt = document.createElement('option')
-    opt.value = key.kanata
-    opt.textContent = `${key.label} (${key.kanata})`
-    if (key.kanata === currentValue) opt.selected = true
-    select.appendChild(opt)
-  }
-  return select
-}
-
-function renderActionItem(action, macroId, actionIndex, callbacks) {
-  const item = document.createElement('div')
-  item.className = 'macro-action-item'
-
-  // アクション種別セレクト
-  const typeSelect = document.createElement('select')
-  typeSelect.className = 'feature-key-select feature-key-select-sm'
-  for (const [val, label] of [['tap', 'キー'], ['text', 'テキスト'], ['delay', '待機']]) {
-    const opt = document.createElement('option')
-    opt.value = val
-    opt.textContent = label
-    if (action.type === val) opt.selected = true
-    typeSelect.appendChild(opt)
-  }
-  typeSelect.addEventListener('change', () => {
-    let newAction
-    if (typeSelect.value === 'tap') newAction = { type: 'tap', key: '' }
-    else if (typeSelect.value === 'text') newAction = { type: 'text', text: '' }
-    else newAction = { type: 'delay', duration: 50 }
-    callbacks.onUpdateMacroAction(macroId, actionIndex, newAction)
-  })
-  item.appendChild(typeSelect)
-
-  if (action.type === 'tap') {
-    const keySelect = createKeySelect(action.key || '')
-    keySelect.addEventListener('change', () => {
-      callbacks.onUpdateMacroAction(macroId, actionIndex, { ...action, key: keySelect.value })
-    })
-    item.appendChild(keySelect)
-  } else if (action.type === 'text') {
-    const textInput = document.createElement('input')
-    textInput.type = 'text'
-    textInput.className = 'feature-text-input'
-    textInput.value = action.text || ''
-    textInput.placeholder = '入力テキスト'
-    textInput.addEventListener('change', () => {
-      callbacks.onUpdateMacroAction(macroId, actionIndex, { ...action, text: textInput.value })
-    })
-    item.appendChild(textInput)
-  } else if (action.type === 'delay') {
-    const durInput = document.createElement('input')
-    durInput.type = 'number'
-    durInput.className = 'feature-number-input'
-    durInput.value = action.duration || 50
-    durInput.min = 1
-    durInput.max = 5000
-    durInput.title = '待機時間 (ms)'
-    durInput.addEventListener('change', () => {
-      const val = parseInt(durInput.value, 10)
-      if (!isNaN(val) && val > 0) {
-        callbacks.onUpdateMacroAction(macroId, actionIndex, { ...action, duration: val })
-      }
-    })
-    item.appendChild(durInput)
-    const msLabel = document.createElement('span')
-    msLabel.className = 'feature-unit'
-    msLabel.textContent = 'ms'
-    item.appendChild(msLabel)
-  }
-
-  const delBtn = document.createElement('button')
-  delBtn.className = 'feature-del-btn feature-del-btn-sm'
-  delBtn.textContent = '×'
-  delBtn.title = 'アクション削除'
-  delBtn.addEventListener('click', () => callbacks.onRemoveMacroAction(macroId, actionIndex))
-  item.appendChild(delBtn)
-
-  return item
-}
-
-export function renderMacrosPanel(state, callbacks) {
+export function renderMacrosPanel(state, actions) {
   const panel = document.getElementById('feature-panel')
-  if (!panel) return
-
   panel.innerHTML = ''
+  const { project, keyLabelMode: mode } = state
+  const macros = project.macros || []
+  const setMacros = (list) => actions.setList('macros', list)
+  const update = (id, fn) => setMacros(macros.map((m) => (m.id === id ? fn(m) : m)))
 
-  const header = document.createElement('div')
-  header.className = 'feature-panel-header'
-  const h3 = document.createElement('h3')
-  h3.textContent = 'マクロ管理'
-  const desc = document.createElement('span')
-  desc.className = 'feature-panel-desc'
-  desc.textContent = 'キーシーケンスを自動実行'
-  const addBtn = document.createElement('button')
-  addBtn.className = 'feature-add-btn'
-  addBtn.textContent = '+ マクロ追加'
-  addBtn.addEventListener('click', () => callbacks.onAddMacro())
-  header.appendChild(h3)
-  header.appendChild(desc)
-  header.appendChild(addBtn)
-  panel.appendChild(header)
-
-  const macros = state.macros || []
+  panel.appendChild(el('div', { class: 'feature-panel-header' }, [
+    el('h3', { text: 'マクロ' }),
+    el('span', { class: 'feature-panel-desc', text: 'Vial のマクロ (M0〜) と同じ形式。テキストは「Vial設定」タブの文字入力方式で変換されます' }),
+    el('button', {
+      class: 'feature-add-btn',
+      text: '+ マクロ追加',
+      onclick: () => {
+        const id = macros.length ? Math.max(...macros.map((m) => m.id)) + 1 : 0
+        setMacros([...macros, { id, actions: [] }])
+      },
+    }),
+  ]))
   if (macros.length === 0) {
-    const empty = document.createElement('p')
-    empty.className = 'feature-empty'
-    empty.textContent = 'マクロがありません。キーシーケンスを自動実行するマクロを追加してください。'
-    panel.appendChild(empty)
+    panel.appendChild(el('p', { class: 'feature-empty', text: 'マクロはありません。' }))
     return
   }
 
   for (const macro of macros) {
-    if (!macro || macro.id === undefined) continue
+    const item = el('div', { class: 'feature-item' })
+    const nameInput = el('input', { type: 'text', class: 'macro-name-input', value: macro.name || '', placeholder: 'メモ (任意)' })
+    nameInput.addEventListener('change', () => update(macro.id, (m) => ({ ...m, name: nameInput.value || undefined })))
+    item.appendChild(el('div', { class: 'feature-row' }, [
+      el('span', { class: 'feature-item-id', text: `M${macro.id}` }),
+      nameInput,
+      el('button', { class: 'feature-del-btn', text: '× 削除', onclick: () => setMacros(macros.filter((m) => m.id !== macro.id)) }),
+    ]))
 
-    const item = document.createElement('div')
-    item.className = 'feature-item'
-
-    // ヘッダー行: ID + ラベル + アクション追加ボタン + 削除
-    const headerRow = document.createElement('div')
-    headerRow.className = 'feature-row'
-
-    const idLabel = document.createElement('span')
-    idLabel.className = 'feature-item-id'
-    idLabel.textContent = `M${macro.id}`
-    headerRow.appendChild(idLabel)
-
-    // 名前フィールド
-    const nameInput = document.createElement('input')
-    nameInput.type = 'text'
-    nameInput.className = 'feature-text-input macro-name-input'
-    nameInput.value = macro.label || ''
-    nameInput.placeholder = '名前（任意）'
-    nameInput.title = 'マクロの名前（表示用）'
-    nameInput.addEventListener('change', () => {
-      callbacks.onUpdateMacro(macro.id, { label: nameInput.value })
-    })
-    headerRow.appendChild(nameInput)
-
-    const addActionTap = document.createElement('button')
-    addActionTap.className = 'feature-add-action-btn'
-    addActionTap.textContent = '+ キー'
-    addActionTap.title = 'キー入力アクション追加'
-    addActionTap.addEventListener('click', () => callbacks.onAddMacroAction(macro.id, 'tap'))
-    headerRow.appendChild(addActionTap)
-
-    const addActionText = document.createElement('button')
-    addActionText.className = 'feature-add-action-btn'
-    addActionText.textContent = '+ テキスト'
-    addActionText.title = 'テキスト入力アクション追加'
-    addActionText.addEventListener('click', () => callbacks.onAddMacroAction(macro.id, 'text'))
-    headerRow.appendChild(addActionText)
-
-    const addActionDelay = document.createElement('button')
-    addActionDelay.className = 'feature-add-action-btn'
-    addActionDelay.textContent = '+ 待機'
-    addActionDelay.title = '待機アクション追加'
-    addActionDelay.addEventListener('click', () => callbacks.onAddMacroAction(macro.id, 'delay'))
-    headerRow.appendChild(addActionDelay)
-
-    const delBtn = document.createElement('button')
-    delBtn.className = 'feature-del-btn'
-    delBtn.textContent = 'マクロ削除'
-    delBtn.addEventListener('click', () => callbacks.onRemoveMacro(macro.id))
-    headerRow.appendChild(delBtn)
-
-    item.appendChild(headerRow)
-
-    const actionList = document.createElement('div')
-    actionList.className = 'macro-action-list'
-
-    const actions = macro.actions || []
-    if (actions.length === 0) {
-      const hint = document.createElement('span')
-      hint.className = 'feature-hint'
-      hint.textContent = 'アクションを追加してください（キー / テキスト / 待機）'
-      actionList.appendChild(hint)
-    } else {
-      for (let i = 0; i < actions.length; i++) {
-        actionList.appendChild(renderActionItem(actions[i], macro.id, i, callbacks))
+    const list = el('div', { class: 'macro-action-list' })
+    const acts = macro.actions || []
+    const setActs = (next) => update(macro.id, (m) => ({ ...m, actions: next }))
+    acts.forEach((act, ai) => {
+      const setAct = (patch) => setActs(acts.map((a, j) => (j === ai ? { ...a, ...patch } : a)))
+      const typeSel = el('select', { class: 'feature-key-select-sm' })
+      for (const [v, label] of ACTION_TYPES) {
+        const opt = el('option', { value: v, text: label })
+        if (v === act.type) opt.selected = true
+        typeSel.appendChild(opt)
       }
+      typeSel.addEventListener('change', () => {
+        const type = typeSel.value
+        const next = type === 'text' ? { type, text: '' } : type === 'delay' ? { type, duration: 50 } : { type, keys: act.keys || ['a'] }
+        setActs(acts.map((a, j) => (j === ai ? next : a)))
+      })
+      const row = el('div', { class: 'macro-action-item' }, [typeSel])
+      if (act.type === 'text') {
+        const input = el('input', { type: 'text', class: 'feature-text-input', value: act.text || '' })
+        input.addEventListener('change', () => setAct({ text: input.value }))
+        row.appendChild(input)
+      } else if (act.type === 'delay') {
+        const input = el('input', { type: 'number', class: 'feature-number-input', value: act.duration || 0, min: 1, max: 65535 })
+        input.addEventListener('change', () => setAct({ duration: parseInt(input.value, 10) || 0 }))
+        row.appendChild(input)
+        row.appendChild(el('span', { class: 'feature-unit', text: 'ms' }))
+      } else {
+        const keys = act.keys || []
+        keys.forEach((key, ki) => {
+          const { mods, baseKey } = splitChord(key)
+          const setKey = (k) => setAct({ keys: keys.map((x, j) => (j === ki ? k : x)) })
+          if (act.type === 'tap') {
+            row.appendChild(modCheckboxes(mods, (m) => setKey(makeModified(m, baseKey).kanataKey), { small: true }))
+          }
+          row.appendChild(keySelect(baseKey, mode, (k) => setKey(act.type === 'tap' ? makeModified(mods, k).kanataKey : k), { className: 'feature-key-select-sm' }))
+          if (keys.length > 1) {
+            row.appendChild(el('button', { class: 'feature-del-btn-sm', text: '−', title: 'キーを削除', onclick: () => setAct({ keys: keys.filter((_, j) => j !== ki) }) }))
+          }
+        })
+        row.appendChild(el('button', { class: 'feature-add-action-btn', text: '+キー', onclick: () => setAct({ keys: [...keys, 'a'] }) }))
+      }
+      row.appendChild(el('button', { class: 'feature-del-btn-sm', text: '↑', title: '上へ', disabled: ai === 0, onclick: () => setActs(move(acts, ai, -1)) }))
+      row.appendChild(el('button', { class: 'feature-del-btn-sm', text: '↓', title: '下へ', disabled: ai === acts.length - 1, onclick: () => setActs(move(acts, ai, 1)) }))
+      row.appendChild(el('button', { class: 'feature-del-btn-sm', text: '×', title: 'アクション削除', onclick: () => setActs(acts.filter((_, j) => j !== ai)) }))
+      list.appendChild(row)
+    })
+    item.appendChild(list)
+    const addRow = el('div', { class: 'feature-row' })
+    for (const [type, label] of ACTION_TYPES) {
+      addRow.appendChild(el('button', {
+        class: 'feature-add-action-btn',
+        text: `+ ${label}`,
+        onclick: () => setActs([...acts, type === 'text' ? { type, text: '' } : type === 'delay' ? { type, duration: 50 } : { type, keys: [type === 'tap' ? 'a' : 'lsft'] }]),
+      }))
     }
-
-    item.appendChild(actionList)
+    item.appendChild(addRow)
     panel.appendChild(item)
   }
+}
+
+function move(list, i, d) {
+  const out = [...list]
+  const j = i + d
+  if (j < 0 || j >= out.length) return out
+  ;[out[i], out[j]] = [out[j], out[i]]
+  return out
 }

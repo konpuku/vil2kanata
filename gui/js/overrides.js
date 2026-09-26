@@ -1,170 +1,101 @@
 // ============================================================
-// キーオーバーライド管理パネル
+// キーオーバーライド / Alt Repeat Key パネル
 // ============================================================
 
-import { getAllBasicKeys } from './converter.js'
+import { el, keyConfigEditor, keySelect, modCheckboxes } from './pickers.js'
 
-let cachedBasicKeys = null
-
-function getBasicKeys() {
-  if (!cachedBasicKeys) cachedBasicKeys = getAllBasicKeys()
-  return cachedBasicKeys
-}
-
-function createKeySelect(currentValue) {
-  const select = document.createElement('select')
-  select.className = 'feature-key-select'
-
-  const emptyOpt = document.createElement('option')
-  emptyOpt.value = ''
-  emptyOpt.textContent = '-- キー選択 --'
-  if (!currentValue) emptyOpt.selected = true
-  select.appendChild(emptyOpt)
-
-  for (const key of getBasicKeys()) {
-    const opt = document.createElement('option')
-    opt.value = key.kanata
-    opt.textContent = `${key.label} (${key.kanata})`
-    if (key.kanata === currentValue) opt.selected = true
-    select.appendChild(opt)
-  }
-  return select
-}
-
-const MOD_DEFS = [
-  { value: 'lsft', label: 'LShift' },
-  { value: 'rsft', label: 'RShift' },
-  { value: 'lctl', label: 'LCtrl' },
-  { value: 'rctl', label: 'RCtrl' },
-  { value: 'lalt', label: 'LAlt' },
-  { value: 'ralt', label: 'RAlt' },
-  { value: 'lmet', label: 'LWin' },
-  { value: 'rmet', label: 'RWin' },
-]
-
-function createModCheckboxes(currentMods, onChange) {
-  const row = document.createElement('div')
-  row.className = 'modifier-checkbox-row modifier-checkbox-row-sm'
-
-  let mods = [...(currentMods || [])]
-
-  for (const mod of MOD_DEFS) {
-    const cbLabel = document.createElement('label')
-    cbLabel.className = 'modifier-checkbox-label modifier-checkbox-label-sm'
-    const cb = document.createElement('input')
-    cb.type = 'checkbox'
-    cb.checked = mods.includes(mod.value)
-    cb.addEventListener('change', () => {
-      if (cb.checked) {
-        if (!mods.includes(mod.value)) mods.push(mod.value)
-      } else {
-        mods = mods.filter((m) => m !== mod.value)
-      }
-      onChange([...mods])
-    })
-    cbLabel.appendChild(cb)
-    cbLabel.appendChild(document.createTextNode(mod.label))
-    row.appendChild(cbLabel)
-  }
-  return row
-}
-
-export function renderOverridesPanel(state, callbacks) {
+export function renderOverridesPanel(state, resolved, actions) {
   const panel = document.getElementById('feature-panel')
-  if (!panel) return
-
   panel.innerHTML = ''
+  const { project, keyLabelMode: mode } = state
+  const list = project.keyOverrides || []
+  const setList = (next) => actions.setList('keyOverrides', next)
+  const update = (id, patch) => setList(list.map((k) => (k.id === id ? { ...k, ...patch } : k)))
+  const layerNames = resolved.layers.map((l) => l.name)
+  const ctx = { mode, layerNames, macros: project.macros, tapDances: project.tapDances, userKeys: project.userKeys, compact: true }
 
-  const header = document.createElement('div')
-  header.className = 'feature-panel-header'
-  const h3 = document.createElement('h3')
-  h3.textContent = 'キーオーバーライド管理'
-  const desc = document.createElement('span')
-  desc.className = 'feature-panel-desc'
-  desc.textContent = '修飾キー+キーの組み合わせを別のキーに置き換え'
-  const addBtn = document.createElement('button')
-  addBtn.className = 'feature-add-btn'
-  addBtn.textContent = '+ オーバーライド追加'
-  addBtn.addEventListener('click', () => callbacks.onAddOverride())
-  header.appendChild(h3)
-  header.appendChild(desc)
-  header.appendChild(addBtn)
-  panel.appendChild(header)
+  panel.appendChild(el('div', { class: 'feature-panel-header' }, [
+    el('h3', { text: 'キーオーバーライド' }),
+    el('span', { class: 'feature-panel-desc', text: '修飾キー + キー を別のキーに置き換え (Kanata の defoverrides)' }),
+    el('button', {
+      class: 'feature-add-btn',
+      text: '+ 追加',
+      onclick: () => {
+        const id = list.length ? Math.max(...list.map((k) => k.id)) + 1 : 0
+        setList([...list, { id, enabled: true, trigger: { type: 'basic', kanataKey: 'bspc' }, triggerMods: ['lsft'], replacement: { type: 'basic', kanataKey: 'del' }, layers: 0xFFFF, negativeMods: [], suppressedMods: [], oneMod: false }])
+      },
+    }),
+  ]))
+  if (list.length === 0) panel.appendChild(el('p', { class: 'feature-empty', text: 'キーオーバーライドはありません。' }))
 
-  const overrides = state.keyOverrides || []
-  if (overrides.length === 0) {
-    const empty = document.createElement('p')
-    empty.className = 'feature-empty'
-    empty.textContent = 'キーオーバーライドがありません。修飾キー+キーの組み合わせを別のキーに置き換えます。'
-    panel.appendChild(empty)
-    return
+  for (const ko of list) {
+    const item = el('div', { class: `feature-item${ko.enabled === false ? ' feature-item-disabled' : ''}` })
+    const enabled = el('input', { type: 'checkbox' })
+    enabled.checked = ko.enabled !== false
+    enabled.addEventListener('change', () => update(ko.id, { enabled: enabled.checked }))
+    const oneMod = el('input', { type: 'checkbox' })
+    oneMod.checked = !!ko.oneMod
+    oneMod.addEventListener('change', () => update(ko.id, { oneMod: oneMod.checked }))
+    item.appendChild(el('div', { class: 'feature-row' }, [
+      el('span', { class: 'feature-item-id', text: `KO${ko.id}` }),
+      el('label', { class: 'modifier-checkbox-label' }, [enabled, '有効']),
+      el('label', { class: 'modifier-checkbox-label', title: 'いずれか 1 つの修飾キーで発動' }, [oneMod, 'どれか 1 つの修飾で発動']),
+      el('button', { class: 'feature-del-btn', text: '× 削除', onclick: () => setList(list.filter((k) => k.id !== ko.id)) }),
+    ]))
+    const trigKey = ko.trigger?.kanataKey || ko.trigger?.baseKey || ''
+    item.appendChild(el('div', { class: 'feature-row feature-row-wrap' }, [
+      el('span', { class: 'feature-unit', text: 'トリガー:' }),
+      modCheckboxes(ko.triggerMods, (mods) => update(ko.id, { triggerMods: mods }), { small: true }),
+      el('span', { class: 'feature-operator', text: '+' }),
+      keySelect(trigKey, mode, (k) => update(ko.id, { trigger: { type: 'basic', kanataKey: k } }), { className: 'feature-key-select' }),
+    ]))
+    item.appendChild(el('div', { class: 'td-slot' }, [
+      el('span', { class: 'feature-unit td-slot-label', text: '→ 置換' }),
+      keyConfigEditor(ko.replacement, { ...ctx, types: ['basic', 'modified', 'disabled'], onChange: (kc) => update(ko.id, { replacement: kc }) }),
+    ]))
+    const notes = []
+    const allLayers = (1 << layerNames.length) - 1
+    if (ko.layers !== undefined && (ko.layers & allLayers) !== allLayers) {
+      notes.push(`レイヤー限定 (${layerNames.filter((_, i) => ko.layers & (1 << i)).join(', ')}) は Kanata v1.10 では再現できず全レイヤー共通になります`)
+    }
+    if (ko.negativeMods?.length) notes.push(`Negative mods (${ko.negativeMods.join(', ')}) は再現できません`)
+    if (notes.length) item.appendChild(el('p', { class: 'editor-hint', text: `注意: ${notes.join(' / ')}` }))
+    panel.appendChild(item)
   }
 
-  for (const ko of overrides) {
-    if (!ko || ko.id === undefined) continue
-
-    const item = document.createElement('div')
-    item.className = 'feature-item'
-
-    const row = document.createElement('div')
-    row.className = 'feature-row feature-row-wrap'
-
-    const idLabel = document.createElement('span')
-    idLabel.className = 'feature-item-id'
-    idLabel.textContent = `O${ko.id}`
-    row.appendChild(idLabel)
-
-    const triggerLabel = document.createElement('span')
-    triggerLabel.className = 'feature-unit'
-    triggerLabel.textContent = '入力:'
-    row.appendChild(triggerLabel)
-
-    // トリガー修飾キーチェックボックス
-    const triggerModBoxes = createModCheckboxes(ko.triggerMods || [], (newMods) => {
-      callbacks.onUpdateOverride(ko.id, { triggerMods: newMods })
-    })
-    row.appendChild(triggerModBoxes)
-
-    // トリガーキー
-    const triggerSelect = createKeySelect(ko.trigger || '')
-    triggerSelect.title = 'トリガーキー'
-    triggerSelect.addEventListener('change', () => {
-      callbacks.onUpdateOverride(ko.id, { trigger: triggerSelect.value })
-    })
-    row.appendChild(triggerSelect)
-
-    const arrow = document.createElement('span')
-    arrow.className = 'feature-operator'
-    arrow.textContent = '→'
-    row.appendChild(arrow)
-
-    const replLabel = document.createElement('span')
-    replLabel.className = 'feature-unit'
-    replLabel.textContent = '出力:'
-    row.appendChild(replLabel)
-
-    // 置き換え修飾キーチェックボックス
-    const replModBoxes = createModCheckboxes(ko.replacementMods || [], (newMods) => {
-      callbacks.onUpdateOverride(ko.id, { replacementMods: newMods })
-    })
-    row.appendChild(replModBoxes)
-
-    // 置き換えキー
-    const replSelect = createKeySelect(ko.replacementKey || '')
-    replSelect.title = '置き換えキー'
-    replSelect.addEventListener('change', () => {
-      callbacks.onUpdateOverride(ko.id, { replacementKey: replSelect.value })
-    })
-    row.appendChild(replSelect)
-
-    const delBtn = document.createElement('button')
-    delBtn.className = 'feature-del-btn'
-    delBtn.textContent = '×'
-    delBtn.title = '削除'
-    delBtn.addEventListener('click', () => callbacks.onRemoveOverride(ko.id))
-    row.appendChild(delBtn)
-
-    item.appendChild(row)
-    panel.appendChild(item)
+  // Alt Repeat Key
+  const ars = project.altRepeatKeys || []
+  const setArs = (next) => actions.setList('altRepeatKeys', next)
+  const updateAr = (id, patch) => setArs(ars.map((a) => (a.id === id ? { ...a, ...patch } : a)))
+  panel.appendChild(el('div', { class: 'feature-panel-header' }, [
+    el('h3', { text: 'Alt Repeat Key' }),
+    el('span', { class: 'feature-panel-desc', text: '直前のキーに応じて QK_ALT_REPEAT_KEY の出力を変える (矢印・Home/End 等の反対方向は既定で登録済み)' }),
+    el('button', {
+      class: 'feature-add-btn',
+      text: '+ 追加',
+      onclick: () => {
+        const id = ars.length ? Math.max(...ars.map((a) => a.id)) + 1 : 0
+        setArs([...ars, { id, keycode: { type: 'basic', kanataKey: 'a' }, altKeycode: { type: 'basic', kanataKey: 'b' }, allowedMods: [], bidirectional: false, enabled: true }])
+      },
+    }),
+  ]))
+  for (const ar of ars) {
+    const enabled = el('input', { type: 'checkbox' })
+    enabled.checked = ar.enabled !== false
+    enabled.addEventListener('change', () => updateAr(ar.id, { enabled: enabled.checked }))
+    const bidi = el('input', { type: 'checkbox' })
+    bidi.checked = !!ar.bidirectional
+    bidi.addEventListener('change', () => updateAr(ar.id, { bidirectional: bidi.checked }))
+    panel.appendChild(el('div', { class: 'feature-item' }, [
+      el('div', { class: 'feature-row feature-row-wrap' }, [
+        el('label', { class: 'modifier-checkbox-label' }, [enabled, '有効']),
+        el('span', { class: 'feature-unit', text: '直前のキー' }),
+        keySelect(ar.keycode?.kanataKey || ar.keycode?.baseKey || '', mode, (k) => updateAr(ar.id, { keycode: { type: 'basic', kanataKey: k } }), { className: 'feature-key-select' }),
+        el('span', { class: 'feature-operator', text: '→' }),
+        keySelect(ar.altKeycode?.kanataKey || ar.altKeycode?.baseKey || '', mode, (k) => updateAr(ar.id, { altKeycode: { type: 'basic', kanataKey: k } }), { className: 'feature-key-select' }),
+        el('label', { class: 'modifier-checkbox-label' }, [bidi, '双方向']),
+        el('button', { class: 'feature-del-btn', text: '×', onclick: () => setArs(ars.filter((a) => a.id !== ar.id)) }),
+      ]),
+    ]))
   }
 }

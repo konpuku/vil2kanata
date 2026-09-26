@@ -1,210 +1,91 @@
 # 開発ドキュメント
 
-## 概要
-
-vil2kanata は Vial (.vil) の設定ファイルを Kanata (.kbd) の設定ファイルに変換する Node.js CLI ツール。
-外部依存なし、単一ファイル (`vil2kanata.js`) で構成される。
-
-## .vil ファイル構造
-
-Vial が出力する `.vil` ファイルは JSON 形式で、以下のフィールドを持つ。
+## 構成
 
 ```
-{
-  version        : number       プロトコルバージョン
-  uid            : number       キーボード固有ID
-  layout         : string[][][]  layout[layer][row][col] = QMKキーコード文字列
-  macro          : array[][]     macro[index] = アクション配列
-  tap_dance      : array[]       [on_tap, on_hold, on_double_tap, on_tap_hold, tapping_term]
-  combo          : array[]       [key1, key2, key3, key4, result]
-  key_override   : object[]      {trigger, replacement, trigger_mods, ...}
-  settings       : object        QMK設定値
-}
+src/core/          変換ロジック (CLI と GUI で共通・DOM / fs に依存しない ES Modules)
+  keycodes.mjs     QMK / Vial キーコード表 (vial-gui keycodes_v6 準拠)
+  qmk.mjs          キーコード文字列・数値 → keyConfig (正規化キー表現)
+  settings.mjs     Vial QMK Settings (qsid) のデコード
+  kle.mjs          KLE / vial.json の解析 (回転・レイアウトオプション対応)
+  firmware.mjs     keymap.c / config.h のテキスト解析 (USER キーコード推定)
+  vial.mjs         .vil (+ vial.json 等) → ソースモデル
+  mapping.mjs      ソース (自作KB) → ターゲット (ノートPC) の自動対応付け
+  layouts.mjs      ノートPC配列プリセット
+  text.mjs         マクロの text → キー列 (US / JIS)
+  emit.mjs         Kanata (.kbd) 出力器 (唯一の出力実装)
+  project.mjs      プロジェクト (v2) の組み立て・保存形式・v1 移行
+  index.mjs        CLI / テスト用のまとめ
+vil2kanata.js      CLI (引数処理と入出力のみ)
+gui/js/*.js        GUI (状態管理・描画)
+gui/bundle.js      build.js が src/core と gui/js を結合した生成物 (file:// で動かすため)
+test/              node:test によるテストとフィクスチャ (Corne 型分割キーボード)
 ```
 
-全てのキーコードは `"KC_A"`, `"LGUI_T(KC_A)"` のような **文字列** で格納されている。
-数値キーコードではない点が重要。
-
-## アーキテクチャ
+## データの流れ
 
 ```
-                    ┌──────────────┐
- .vil (JSON) ──────>│ JSONパース    │
-                    └──────┬───────┘
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-  │ マクロ変換    │ │ TD変換       │ │ レイヤー走査  │
-  │ convertMacro │ │ convertTD    │ │ convertKey   │
-  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-         │                │                │
-         │          ┌─────┴─────┐          │
-         │          ▼           ▼          │
-         │   ┌────────────┐ ┌────────┐    │
-         │   │ コンボ変換  │ │ KO変換 │    │
-         │   └─────┬──────┘ └───┬────┘    │
-         │         │            │          │
-         ▼         ▼            ▼          ▼
-       ┌─────────────────────────────────────┐
-       │ generateKanataConfig                │
-       │ (defalias / deflayer / defchordsv2  │
-       │  を組み立てて .kbd 文字列を生成)     │
-       └─────────────────┬───────────────────┘
-                         │
-                         ▼
-                    .kbd (text)
+ .vil ─┐
+ vial.json ─┼─ importVil() ──→ ソースモデル ──┐
+ keymap.c / config.h ─┘   (keys, layers, macros, TD,   │
+                           combos, KO, settings...)    │
+                                                       ▼
+ ノートPC配列 (layouts.mjs) ──────────────→ プロジェクト v2
+                                  { target, source, mapping{starts,pins},
+                                    edits[layer][targetIdx], macros..., qmk, kanata }
+                                                       │
+                                        resolveProject()  ← computeMapping()
+                                                       │
+                                  ノートPC基準のレイヤー + defsrc + 左右の手
+                                                       │
+                                                  emitKanata()
+                                                       ▼
+                                                     .kbd
 ```
 
-## 変換処理フロー
+- **keyConfig** がすべてのキー表現の共通形式です (`qmk.mjs` 冒頭のコメント参照)。
+  GUI のエディタもこの形式を直接編集します。
+- **対応付け (mapping)** は「セグメントの始点 (`starts`)」と「個別ピン (`pins`)」だけを保存し、
+  実際の割り当ては毎回 `computeMapping()` で再計算します。そのため全レイヤーに同じ対応付けが適用され、
+  始点を変えても手動変更 (`edits`) は失われません。
+- `edits` はノートPC側のキー位置に対する手動変更で、対応付けより優先されます。
 
-1. `.vil` ファイル読み込み → JSON パース + バリデーション
-2. マクロデータ → `(macro ...)` 変換（down/tap/up パターンの自動最適化）
-3. タップダンスデータ → `(tap-dance ...)` 変換
-4. 全レイヤーのキーコード文字列を走査し、エイリアスが必要なものを `aliasContext` に登録
-5. コンボデータ → `(defchordsv2 ...)` 変換
-6. キーオーバーライド → コメントとして出力
-7. `defsrc`, `defalias`, `deflayer`, `defchordsv2` を組み立てて出力
+## 自動対応付けのアルゴリズム (mapping.mjs)
 
-## 主要関数
+1. ソースのキーを中心座標の y で行に分け、行内で隙間 (> 0.6u) があれば別セグメントにする
+   (分割キーボードの左右・親指クラスタが別セグメントになる)
+2. セグメントごとに始点を決める
+   - `starts` にユーザー指定があればそれを使う (`null` = 割り当てない)
+   - ベースレイヤーのタップキー名とノートPCのキー名が一致する組から (行, 列オフセット) を投票し、
+     最多票を採用 (4 キー以上のセグメントは 2 票以上必要)
+   - 決まらないセグメントは、最も近い確定済みセグメントの行ずれと横位置から推定
+3. 始点から右へ順番に割り当て (優先度: ユーザー指定 → 自動 → 推定。先に取られたキーはスキップ)
+4. `pins` は常に最優先
 
-### パーサー (166-252行)
+## Vial → Kanata の対応で注意している点
 
-| 関数 | 入力例 | 出力 |
-|---|---|---|
-| `parseModified(str)` | `"LSFT(KC_8)"` | `{type:'modified', prefix:'S-', key:'8'}` |
-| `parseModTap(str)` | `"LGUI_T(KC_A)"` | `{type:'mod-tap', mod:'lmet', key:'a'}` |
-| `parseLayerTap(str)` | `"LT1(KC_BSPACE)"` | `{type:'layer-tap', layer:1, key:'bspc'}` |
-| `parseLayerOp(str)` | `"MO(2)"` | `{type:'layer-op', op:'MO', layer:2}` |
-| `parseMacroRef(str)` | `"M0"` | `{type:'macro-ref', index:0}` |
-| `parseTapDanceRef(str)` | `"TD(3)"` | `{type:'tap-dance-ref', index:3}` |
-| `parseUserKeycode(str)` | `"USER01"` | `{type:'user', index:1}` |
+- `macro` 内の `0`〜`9` は Kanata では**遅延 (ms)** として解釈されるため `Digit1` 形式で出力する
+- `layer-toggle` は Kanata では `layer-while-held` の別名。QMK の `TG` は `layer-switch` で実装し、
+  対象レイヤー上 (透過でベースの TG に落ちる位置を含む) ではベースへ戻る動作にする
+- `delegate-to-first-layer yes` で「切り替えたレイヤーの透過キーはレイヤー 0 に落ちる」という QMK の挙動に合わせる
+- Magic のキー入れ替えは QMK と同様にキーマップ上のキーコードだけに適用し、修飾ビット・マクロ・タップダンスには適用しない
+- コンボはキーコードで構成キーを探し、そのキーを出さないレイヤーを `disabled-layers` にする
+- `ro` / IME キー等の OS 依存キーは `deflocalkeys-*` で定義し、1 つのファイルが Windows / Linux の両方で読めるようにする
 
-### 変換 (254-389行)
+## ビルドとテスト
 
-| 関数 | 役割 |
-|---|---|
-| `convertBasicKeycode(qmkStr)` | `KC_X` → Kanata キー名 |
-| `convertKeycode(qmkStr, aliasContext)` | トップレベル変換。複合キーはエイリアス登録 |
-| `convertBasicOrModified(qmkStr)` | 基本 or 修飾付きキーの文字列変換 |
-
-### マクロ (391-561行)
-
-| 関数 | 役割 |
-|---|---|
-| `convertMacro(macroActions)` | アクション配列 → `(macro ...)` 文字列 |
-| `optimizeMacroActions(actions)` | `down(MOD)+tap(KEY)+up(MOD)` → `S-KEY` に圧縮 |
-| `convertMacroKeycode(qmkStr)` | マクロ内のキーコード変換 (`KC_TRNS` はスキップ) |
-| `convertTextToKeys(text)` | `"text"` アクション → JIS キーシーケンス |
-
-### タップダンス (563-636行)
-
-| 関数 | 役割 |
-|---|---|
-| `convertTapDance(tdData, index)` | 5要素配列 → `(tap-dance ...)` 定義 |
-
-on_hold がある場合は `tap-hold-release` と `tap-dance` を組み合わせて生成する。
-
-### コンボ (638-694行)
-
-| 関数 | 役割 |
-|---|---|
-| `comboInputKey(qmkStr)` | コンボ入力キーを defsrc 対応のキー名に変換 |
-| `convertCombo(comboData, macroNames)` | `defchordsv2` エントリ生成 |
-
-Mod-Tap / Layer-Tap キーの場合は tap キー名を使用する。
-
-### エイリアスコンテキスト (725-821行)
-
-`createAliasContext()` が返すオブジェクトで、変換中に発見されたエイリアスを一元管理する。
-
-| メソッド | 用途 |
-|---|---|
-| `registerModTap(parsed)` | `a-lmet` のような名前で登録 |
-| `registerLayerTap(parsed)` | `l1-bspc` のような名前で登録 |
-| `registerLayerOp(parsed)` | `mo2` のような名前で登録 |
-| `registerModified(qmkStr, kanataStr)` | `k-lsft_8` のような名前で登録 |
-| `registerUser(parsed)` | `usr01` のような名前で登録 |
-| `registerMouseMove(name, value)` | `ms-l` のような名前で登録 |
-
-同じキーが複数回出現しても、エイリアスは 1 度だけ登録される。
-
-## キーコードマッピング
-
-### BASIC_KEYCODE_MAP (11-114行)
-
-QMK の `KC_*` 文字列を Kanata キー名に変換する静的マッピング。
-アルファベット、数字、F キー、記号、ナビゲーション、修飾キー、日本語キー、テンキー、メディアキーを網羅。
-
-### MOD_PREFIX_MAP (117-122行)
-
-修飾付きキーコードの Kanata プレフィックス。
-
-```
-LSFT → S-    RSFT → RS-
-LCTL → C-    RCTL → RC-
-LALT → A-    RALT → RA-
-LGUI → M-    RGUI → RM-
+```bash
+node build.js            # gui/bundle.js を再生成 (src/core や gui/js を変更したら必須)
+npm test                 # テスト (bundle が最新かも確認)
+KANATA_BIN=/path/to/kanata npm test   # 出力を kanata --check で構文検証
 ```
 
-### TEXT_TO_KEYS_JIS (143-164行)
+- `build.js` は `import { ... } from '...'` を除去して 1 ファイルに結合する簡易バンドラーです。
+  `export function` / `export const` のみ対応し、export 名がモジュール間で重複するとエラーにします。
+- CI (`.github/workflows/test.yml`) は Kanata v1.10.1 の Linux バイナリを取得して検証します。
 
-マクロの `["text", "..."]` アクション用。文字 → JIS キーボードのキーストロークに変換する。
+## Kanata のバージョン
 
-## マクロ最適化の仕組み
-
-`optimizeMacroActions()` は以下のパターンを検出して圧縮する。
-
-**入力:**
-```json
-["down","KC_LSHIFT"], ["tap","KC_8"], ["up","KC_LSHIFT"]
-```
-
-**処理:**
-1. `down(KC_LSHIFT)` を検出
-2. 後続の `tap` アクションを収集: `KC_8`
-3. 対応する `up(KC_LSHIFT)` を検出
-4. `{type: 'modified-tap', prefix: 'S-', keys: ['KC_8']}` に圧縮
-
-**出力:**
-```
-S-8
-```
-
-複数キーの `down` (`["down","KC_BTN1","KC_BTN1"]`) は `tap` として扱う。
-
-## タップダンスの変換パターン
-
-QMK のタップダンスは 4 つのアクション (tap / hold / double_tap / tap_hold) を持つが、
-Kanata の `tap-dance` はタップ回数のみで区別する。
-
-hold の区別が必要な場合は `tap-hold-release` を組み合わせる。
-
-| on_hold | on_tap_hold | 変換結果 |
-|---|---|---|
-| なし | なし | `(tap-dance N (tapKey doubleTapKey))` |
-| あり | なし | `(tap-dance N ((tap-hold-release T T tapKey holdKey) doubleTapKey))` |
-| あり | あり | `(tap-dance N ((tap-hold-release T T tapKey holdKey) (tap-hold-release T T dtKey tapHoldKey)))` |
-| なし | あり | `(tap-dance N (tapKey (tap-hold-release T T dtKey tapHoldKey)))` |
-
-## 既知の制限事項
-
-### defsrc の自動生成
-
-ベースレイヤーのキー名から自動生成するが、以下の問題がある。
-
-- **重複キー**: 同じ tap キーが複数のキーに割り当てられている場合 (例: 2 つの `LT(KC_TAB)`)、defsrc に同じキー名が出現する。警告コメントは出力されるが自動解決はしない。
-- **USER キー**: `f13+index` のプレースホルダーで代替する。
-
-### キーオーバーライド
-
-QMK の Key Override は Kanata に直接対応する機能がないため、コメントとして元の設定を出力するのみ。`fork` や `switch` での近似実装はユーザーに委ねる。
-
-### テキストマクロの JIS 依存
-
-`["text", "..."]` アクションの文字→キー変換は JIS レイアウトを前提としている。US レイアウトで使用する場合は `TEXT_TO_KEYS_JIS` マッピングの修正が必要。
-
-## 動作確認済み環境
-
-- Vial Protocol v6 / VIA Protocol v9
-- Bancouver40 (4x10, 5 レイヤー, マクロ 16 スロット, タップダンス 8, コンボ 8, キーオーバーライド 8)
+出力は Kanata v1.10.1 で検証しています。`tap-hold-opposite-hand`、`require-prior-idle`、
+`defoverridesv2` は v1.10.1 では使えないため使用していません (Chordal Hold・Flow Tap・
+キーオーバーライドのレイヤー限定などが近似/非対応になっているのはこのためです)。

@@ -1,804 +1,604 @@
 // ============================================================
-// アプリケーション初期化・アクション
+// アプリケーション本体 (アクション・描画の統括)
 // ============================================================
 
-import { getState, setState, subscribe } from './store.js'
-import { loadLayout, getAvailableLayouts, flattenLayout } from './layouts.js'
-import {
-  renderKeyboard,
-  renderVilKeyboard,
-  setSelectKeyCallback,
-  setToggleDefsrcCallback,
-  setDeleteLayoutKeyCallback,
-  setSwapKeysCallback,
-  setDropVilKeyCallback,
-} from './keyboard.js'
-import { renderEditor, hideEditor, setUpdateKeyCallback, setUpdatePhysicalKeyCallback } from './editor.js'
-import { renderLayers, setLayerCallbacks } from './layers.js'
-import { renderDefsrcPanel } from './defsrc.js'
-import { exportKbd, importVil, saveProject, loadProject } from './export.js'
-import { renderCombosPanel } from './combos.js'
-import { renderOverridesPanel } from './overrides.js'
+import { getState, setState, updateProject, subscribe, getResolved } from './store.js'
+import { createProject, layerCount } from '../../src/core/project.mjs'
+import { LAYOUT_PRESETS, getPresetKeys } from '../../src/core/layouts.mjs'
+import { renderKeyboard, segmentColor } from './keyboard.js'
+import { keyConfigLabel, getKeyLabel } from './labels.js'
+import { renderLayers } from './layers.js'
+import { renderMappingPanel } from './mapping-panel.js'
+import { renderEditor } from './editor.js'
 import { renderMacrosPanel } from './macros.js'
 import { renderTapDancePanel } from './tap-dance.js'
-
-// ============================================================
-// 機能タブ管理
-// ============================================================
-
-let activeFeatureTab = 'keymap'
+import { renderCombosPanel } from './combos.js'
+import { renderOverridesPanel } from './overrides.js'
+import { renderSettingsPanel } from './settings-panel.js'
+import { renderPreviewPanel } from './preview.js'
+import {
+  exportKbdFile, saveProjectFile, readProjectFile, importVilFiles, importExtraFiles, autoSave, autoLoad, clearAutoSave,
+} from './export.js'
 
 // ============================================================
 // アクション
 // ============================================================
 
-export async function changeLayout(layoutId) {
-  const state = getState()
-  const layoutData = await loadLayout(layoutId)
-  const physicalLayout = flattenLayout(layoutData)
-  const keyCount = physicalLayout.length
+function hasWork(project) {
+  return !!project.source || (project.edits || []).some((e) => e && Object.keys(e).length > 0)
+}
 
-  const layers = state.layers.map((layer, layerIdx) => {
-    const keys = [...layer.keys]
-    while (keys.length < keyCount) {
-      const idx = keys.length
-      if (layerIdx === 0 && physicalLayout[idx]) {
-        const phys = physicalLayout[idx]
-        keys.push({
-          type: 'basic',
-          label: phys.label || phys.kanataKey,
-          kanataKey: phys.kanataKey,
-        })
+export const actions = {
+  setView(view) {
+    setState({ view, pickSegment: null, selectedSource: null })
+  },
+
+  changeTargetLayout(layoutId) {
+    const s = getState()
+    if (hasWork(s.project) && !confirm('ノートPC配列を変更すると、始点・個別の割り当て・手動変更したキーがリセットされます。よろしいですか？')) {
+      setState({})
+      return
+    }
+    const preset = LAYOUT_PRESETS[layoutId]
+    updateProject((p) => ({
+      ...p,
+      target: { layoutId, keys: getPresetKeys(layoutId) },
+      mapping: { starts: {}, pins: {} },
+      edits: (p.edits || []).map(() => ({})),
+      defsrcInclude: [],
+      defsrcExclude: [],
+    }))
+    setState({ selectedTarget: null, keyLabelMode: preset?.keyLabelMode || getState().keyLabelMode })
+  },
+
+  importVil() {
+    document.getElementById('file-input-vil').click()
+  },
+
+  importExtras() {
+    document.getElementById('file-input-extras').click()
+  },
+
+  // ---- 対応付け ----
+  setStart(segId, value) {
+    updateProject((p) => {
+      const starts = { ...(p.mapping.starts || {}) }
+      if (value === undefined) delete starts[segId]
+      else starts[segId] = value
+      return { ...p, mapping: { ...p.mapping, starts } }
+    })
+  },
+
+  startPick(segId) {
+    setState({ pickSegment: segId, selectedSource: null })
+  },
+
+  // ソース s をターゲット t へ割り当て (t に別のキーがあれば入れ替え)
+  pin(s, t) {
+    const resolved = getResolved()
+    updateProject((p) => {
+      const pins = { ...(p.mapping.pins || {}) }
+      if (t !== null) {
+        const other = resolved.inverse[t]
+        if (other !== null && other !== undefined && other !== s) pins[other] = resolved.map[s] ?? null
+      }
+      pins[s] = t
+      return { ...p, mapping: { ...p.mapping, pins } }
+    })
+    setState({ selectedSource: null })
+  },
+
+  resetPins() {
+    updateProject((p) => ({ ...p, mapping: { ...p.mapping, pins: {} } }))
+  },
+
+  resetMapping() {
+    if (!confirm('始点の指定と個別の割り当てをすべて自動に戻しますか？')) return
+    updateProject((p) => ({ ...p, mapping: { starts: {}, pins: {} } }))
+  },
+
+  // ---- レイヤー ----
+  setActiveLayer(i) {
+    setState({ activeLayer: i })
+  },
+
+  addLayer() {
+    updateProject((p) => {
+      const n = layerCount(p)
+      const names = Array.from({ length: n }, (_, i) => p.layerNames?.[i] || (i === 0 ? 'base' : `layer${i}`))
+      const edits = Array.from({ length: n }, (_, i) => p.edits?.[i] || {})
+      return { ...p, layerNames: [...names, `layer${n}`], edits: [...edits, {}] }
+    })
+    setState({ activeLayer: layerCount(getState().project) - 1 })
+  },
+
+  removeLastLayer() {
+    updateProject((p) => ({ ...p, layerNames: p.layerNames.slice(0, -1), edits: (p.edits || []).slice(0, p.layerNames.length - 1) }))
+    setState((s) => ({ activeLayer: Math.min(s.activeLayer, layerCount(s.project) - 1) }))
+  },
+
+  renameLayer(i, name) {
+    updateProject((p) => {
+      const names = Array.from({ length: layerCount(p) }, (_, j) => p.layerNames?.[j] || (j === 0 ? 'base' : `layer${j}`))
+      names[i] = name
+      return { ...p, layerNames: names }
+    })
+  },
+
+  // ---- キー編集 ----
+  selectTarget(t) {
+    setState((s) => ({ selectedTarget: s.selectedTarget === t ? null : t, featureTab: 'key' }))
+  },
+
+  setEdit(layer, t, kc) {
+    updateProject((p) => {
+      const edits = Array.from({ length: layerCount(p) }, (_, i) => ({ ...(p.edits?.[i] || {}) }))
+      edits[layer][t] = kc || { type: 'disabled' }
+      return { ...p, edits }
+    })
+  },
+
+  clearEdit(layer, t) {
+    updateProject((p) => {
+      const edits = (p.edits || []).map((e) => ({ ...e }))
+      if (edits[layer]) delete edits[layer][t]
+      return { ...p, edits }
+    })
+  },
+
+  swapKeys(layer, a, b) {
+    const resolved = getResolved()
+    const ka = resolved.layers[layer].keys[a]
+    const kb = resolved.layers[layer].keys[b]
+    updateProject((p) => {
+      const edits = Array.from({ length: layerCount(p) }, (_, i) => ({ ...(p.edits?.[i] || {}) }))
+      edits[layer][a] = kb
+      edits[layer][b] = ka
+      return { ...p, edits }
+    })
+  },
+
+  toggleDefsrc(t) {
+    const inDefsrc = getResolved().defsrc.includes(t)
+    updateProject((p) => {
+      const include = new Set(p.defsrcInclude || [])
+      const exclude = new Set(p.defsrcExclude || [])
+      if (inDefsrc) {
+        include.delete(t)
+        exclude.add(t)
       } else {
-        keys.push({ type: 'transparent', label: '▽', kanataKey: '_' })
+        exclude.delete(t)
+        include.add(t)
       }
-    }
-    return { ...layer, keys: keys.slice(0, keyCount) }
-  })
-
-  const defsrcKeys = new Set(physicalLayout.map((_, i) => i))
-
-  const keyLabelMode = layoutId.startsWith('jis-') ? 'jis' : getState().keyLabelMode
-
-  setState({
-    layout: layoutId,
-    physicalLayout,
-    defsrcKeys,
-    layers,
-    selectedKey: null,
-    keyLabelMode,
-  })
-}
-
-export function selectKey(index) {
-  const state = getState()
-  const newSelected = index === state.selectedKey ? null : index
-  // キー選択時は「キー設定」タブを自動表示（setStateより先に変更）
-  if (newSelected !== null && activeFeatureTab !== 'keymap') {
-    activeFeatureTab = 'keymap'
-  }
-  setState({ selectedKey: newSelected })
-}
-
-export function toggleDefsrcKey(index) {
-  const state = getState()
-  const defsrcKeys = new Set(state.defsrcKeys)
-  if (defsrcKeys.has(index)) {
-    defsrcKeys.delete(index)
-    if (state.selectedKey === index) setState({ defsrcKeys, selectedKey: null })
-    else setState({ defsrcKeys })
-  } else {
-    defsrcKeys.add(index)
-    setState({ defsrcKeys })
-  }
-}
-
-export function swapKeys(fromIndex, toIndex) {
-  const state = getState()
-  const { activeLayer } = state
-  const layers = state.layers.map((layer, i) => {
-    if (i !== activeLayer) return layer
-    const keys = layer.keys.map((key, j) => {
-      if (j === fromIndex) return layer.keys[toIndex]
-      if (j === toIndex) return layer.keys[fromIndex]
-      return key
+      return { ...p, defsrcInclude: [...include], defsrcExclude: [...exclude] }
     })
-    return { ...layer, keys }
-  })
-  setState({ layers })
-}
+  },
 
-export function selectAllDefsrcKeys() {
-  const state = getState()
-  const defsrcKeys = new Set(state.physicalLayout.map((_, i) => i))
-  setState({ defsrcKeys })
-}
+  // ---- ノートPC配列の編集 ----
+  updateTargetKey(t, patch) {
+    updateProject((p) => ({
+      ...p,
+      target: { ...p.target, layoutId: p.target.layoutId.startsWith('custom') ? p.target.layoutId : `custom-${p.target.layoutId}`, keys: p.target.keys.map((k, i) => (i === t ? { ...k, ...patch } : k)) },
+    }))
+  },
 
-export function clearAllDefsrcKeys() {
-  setState({ defsrcKeys: new Set(), selectedKey: null })
-}
-
-export function updateKey(layerIndex, keyIndex, keyConfig) {
-  const state = getState()
-  const layers = state.layers.map((layer, i) => {
-    if (i !== layerIndex) return layer
-    const keys = layer.keys.map((key, j) => {
-      if (j !== keyIndex) return key
-      return { ...keyConfig }
-    })
-    return { ...layer, keys }
-  })
-  setState({ layers })
-}
-
-export function setActiveLayer(index) {
-  setState({ activeLayer: index, layoutEditMode: false, selectedKey: null })
-}
-
-export function enterSrcMode() {
-  setState({ layoutEditMode: true, selectedKey: null })
-}
-
-export function addLayer(name) {
-  const state = getState()
-  const keyCount = state.physicalLayout.length
-  const keys = Array.from({ length: keyCount }, () => ({
-    type: 'transparent',
-    label: '▽',
-    kanataKey: '_',
-  }))
-  const layers = [...state.layers, { name, keys }]
-  setState({ layers })
-}
-
-export function removeLayer(index) {
-  const state = getState()
-  if (index === 0 || state.layers.length <= 1) return
-  const layers = state.layers.filter((_, i) => i !== index)
-  const activeLayer = state.activeLayer >= layers.length
-    ? layers.length - 1
-    : state.activeLayer
-  setState({ layers, activeLayer, selectedKey: null })
-}
-
-// ============================================================
-// 物理キー編集（レイアウト編集モード用）
-// ============================================================
-
-export function updatePhysicalKey(index, kanataKey, label) {
-  const state = getState()
-  const { physicalLayout, layers } = state
-
-  if (!physicalLayout || index < 0 || index >= physicalLayout.length) return
-
-  const newPhysicalLayout = physicalLayout.map((key, i) => {
-    if (i !== index) return key
-    return { ...key, kanataKey, label }
-  })
-
-  // レイヤー0の対応キーも更新
-  const newLayers = layers.map((layer, layerIdx) => {
-    if (layerIdx !== 0) return layer
-    const keys = layer.keys.map((key, keyIdx) => {
-      if (keyIdx !== index) return key
-      return { ...key, kanataKey, label }
-    })
-    return { ...layer, keys }
-  })
-
-  setState({ physicalLayout: newPhysicalLayout, layers: newLayers })
-}
-
-// ============================================================
-// レイアウト編集
-// ============================================================
-
-export function toggleLayoutEditMode() {
-  const state = getState()
-  setState({ layoutEditMode: !state.layoutEditMode, selectedKey: null })
-}
-
-function deleteAndReflowLayout(physicalLayout, deleteIndex) {
-  const deletedKey = physicalLayout[deleteIndex]
-  const rowY = deletedKey.y
-
-  const remaining = physicalLayout.filter((_, i) => i !== deleteIndex)
-
-  // 削除されたキーと同じ行の残りキーを x 順に取得
-  const originalRowKeys = physicalLayout
-    .filter((k) => k.y === rowY)
-    .sort((a, b) => a.x - b.x)
-  const firstX = originalRowKeys[0]?.x ?? 0
-
-  const remainingRowKeys = remaining
-    .filter((k) => k.y === rowY)
-    .sort((a, b) => a.x - b.x)
-
-  // x 座標を詰め直す
-  let xAccum = firstX
-  const reflowed = remainingRowKeys.map((key) => {
-    const newKey = { ...key, x: xAccum }
-    xAccum += key.w
-    return newKey
-  })
-
-  const reflowMap = new Map()
-  for (let i = 0; i < remainingRowKeys.length; i++) {
-    reflowMap.set(remainingRowKeys[i], reflowed[i])
-  }
-
-  return remaining.map((key) => reflowMap.get(key) ?? key)
-}
-
-export function deleteLayoutKey(index) {
-  const state = getState()
-  const { physicalLayout, layers, defsrcKeys, selectedKey } = state
-  if (!physicalLayout || index < 0 || index >= physicalLayout.length) return
-
-  const newPhysicalLayout = deleteAndReflowLayout(physicalLayout, index)
-
-  const newLayers = layers.map((layer) => ({
-    ...layer,
-    keys: layer.keys.filter((_, i) => i !== index),
-  }))
-
-  const newDefsrcKeys = new Set()
-  for (const idx of defsrcKeys || []) {
-    if (idx < index) newDefsrcKeys.add(idx)
-    else if (idx > index) newDefsrcKeys.add(idx - 1)
-  }
-
-  const newSelectedKey =
-    selectedKey === index
-      ? null
-      : selectedKey !== null && selectedKey > index
-        ? selectedKey - 1
-        : selectedKey
-
-  setState({
-    physicalLayout: newPhysicalLayout,
-    layers: newLayers,
-    defsrcKeys: newDefsrcKeys,
-    selectedKey: newSelectedKey,
-  })
-}
-
-export function addLayoutKey(kanataKey, label, width, rowY) {
-  const state = getState()
-  const { physicalLayout, layers } = state
-
-  const rowKeys = physicalLayout
-    .filter((k) => k.y === rowY)
-    .sort((a, b) => a.x - b.x)
-  const lastKey = rowKeys[rowKeys.length - 1]
-  const newX = lastKey ? lastKey.x + lastKey.w : 0
-
-  const newPhysKey = {
-    x: newX,
-    y: rowY,
-    w: width,
-    h: 1,
-    kanataKey,
-    label: label || kanataKey,
-  }
-
-  const newPhysicalLayout = [...physicalLayout, newPhysKey]
-  const newLayers = layers.map((layer) => ({
-    ...layer,
-    keys: [...layer.keys, { type: 'transparent', label: '▽', kanataKey: '_' }],
-  }))
-
-  setState({ physicalLayout: newPhysicalLayout, layers: newLayers })
-}
-
-export function getDistinctRowYValues(physicalLayout) {
-  const rows = new Set(physicalLayout.map((k) => k.y))
-  return [...rows].sort((a, b) => a - b)
-}
-
-export function renameLayer(index, name) {
-  const state = getState()
-  const layers = state.layers.map((layer, i) => {
-    if (i !== index) return layer
-    return { ...layer, name }
-  })
-  setState({ layers })
-}
-
-// ============================================================
-// キーラベルモード切替
-// ============================================================
-
-export function setKeyLabelMode(mode) {
-  setState({ keyLabelMode: mode })
-}
-
-// ============================================================
-// VILキーボードからのドロップ
-// ============================================================
-
-export function dropVilKey(vilKeyIndex, physKeyIndex) {
-  const state = getState()
-  const { activeLayer, vilLayers } = state
-  const vilLayerKeys = vilLayers[activeLayer]
-  if (!vilLayerKeys || !vilLayerKeys[vilKeyIndex]) return
-
-  const vilKey = { ...vilLayerKeys[vilKeyIndex] }
-  updateKey(activeLayer, physKeyIndex, vilKey)
-}
-
-// ============================================================
-// コンボ CRUD
-// ============================================================
-
-export function addCombo() {
-  const state = getState()
-  const combos = state.combos || []
-  const newId = combos.length > 0 ? Math.max(...combos.map((c) => c.id)) + 1 : 0
-  setState({ combos: [...combos, { id: newId, keys: ['', ''], result: '', timeout: 200 }] })
-}
-
-export function removeCombo(id) {
-  const state = getState()
-  setState({ combos: (state.combos || []).filter((c) => c.id !== id) })
-}
-
-export function updateCombo(id, updates) {
-  const state = getState()
-  setState({
-    combos: (state.combos || []).map((c) => (c.id === id ? { ...c, ...updates } : c)),
-  })
-}
-
-// ============================================================
-// キーオーバーライド CRUD
-// ============================================================
-
-export function addOverride() {
-  const state = getState()
-  const overrides = state.keyOverrides || []
-  const newId = overrides.length > 0 ? Math.max(...overrides.map((o) => o.id)) + 1 : 0
-  setState({
-    keyOverrides: [...overrides, { id: newId, trigger: '', triggerMods: [], replacementKey: '', replacementMods: [] }],
-  })
-}
-
-export function removeOverride(id) {
-  const state = getState()
-  setState({ keyOverrides: (state.keyOverrides || []).filter((o) => o.id !== id) })
-}
-
-export function updateOverride(id, updates) {
-  const state = getState()
-  setState({
-    keyOverrides: (state.keyOverrides || []).map((o) => (o.id === id ? { ...o, ...updates } : o)),
-  })
-}
-
-// ============================================================
-// マクロ CRUD
-// ============================================================
-
-export function addMacro() {
-  const state = getState()
-  const macros = state.macros || []
-  const newId = macros.length > 0 ? Math.max(...macros.map((m) => m.id)) + 1 : 0
-  setState({ macros: [...macros, { id: newId, actions: [] }] })
-}
-
-export function removeMacro(id) {
-  const state = getState()
-  setState({ macros: (state.macros || []).filter((m) => m.id !== id) })
-}
-
-export function updateMacro(id, updates) {
-  const state = getState()
-  setState({
-    macros: (state.macros || []).map((m) => (m.id === id ? { ...m, ...updates } : m)),
-  })
-}
-
-export function addMacroAction(macroId, actionType) {
-  const state = getState()
-  let newAction
-  if (actionType === 'tap') newAction = { type: 'tap', key: '' }
-  else if (actionType === 'delay') newAction = { type: 'delay', duration: 50 }
-  else newAction = { type: 'text', text: '' }
-  setState({
-    macros: (state.macros || []).map((m) => {
-      if (m.id !== macroId) return m
-      return { ...m, actions: [...(m.actions || []), newAction] }
-    }),
-  })
-}
-
-export function removeMacroAction(macroId, actionIndex) {
-  const state = getState()
-  setState({
-    macros: (state.macros || []).map((m) => {
-      if (m.id !== macroId) return m
-      return { ...m, actions: (m.actions || []).filter((_, i) => i !== actionIndex) }
-    }),
-  })
-}
-
-export function updateMacroAction(macroId, actionIndex, updates) {
-  const state = getState()
-  setState({
-    macros: (state.macros || []).map((m) => {
-      if (m.id !== macroId) return m
+  deleteTargetKey(t) {
+    const shift = (i) => (i === t ? null : i > t ? i - 1 : i)
+    updateProject((p) => {
+      const edits = (p.edits || []).map((e) => {
+        const out = {}
+        for (const [k, v] of Object.entries(e || {})) {
+          const n = shift(Number(k))
+          if (n !== null) out[n] = v
+        }
+        return out
+      })
+      const starts = {}
+      for (const [k, v] of Object.entries(p.mapping.starts || {})) {
+        if (v === null) starts[k] = null
+        else if (shift(v) !== null) starts[k] = shift(v)
+      }
+      const pins = {}
+      for (const [k, v] of Object.entries(p.mapping.pins || {})) pins[k] = v === null ? null : shift(v)
       return {
-        ...m,
-        actions: (m.actions || []).map((a, i) => (i === actionIndex ? { ...a, ...updates } : a)),
+        ...p,
+        target: { ...p.target, layoutId: p.target.layoutId.startsWith('custom') ? p.target.layoutId : `custom-${p.target.layoutId}`, keys: p.target.keys.filter((_, i) => i !== t) },
+        edits,
+        mapping: { starts, pins },
+        defsrcInclude: (p.defsrcInclude || []).map(shift).filter((v) => v !== null),
+        defsrcExclude: (p.defsrcExclude || []).map(shift).filter((v) => v !== null),
       }
-    }),
-  })
+    })
+    setState({ selectedTarget: null })
+  },
+
+  addTargetKey(kanataKey, label, width, rowY) {
+    updateProject((p) => {
+      const row = p.target.keys.filter((k) => Math.abs(k.y - rowY) < 0.01).sort((a, b) => a.x - b.x)
+      const last = row[row.length - 1]
+      const key = { x: last ? last.x + last.w : 0, y: rowY, w: width, h: last?.h || 1, kanataKey, label: label || getKeyLabel(kanataKey, getState().keyLabelMode) }
+      return { ...p, target: { ...p.target, layoutId: p.target.layoutId.startsWith('custom') ? p.target.layoutId : `custom-${p.target.layoutId}`, keys: [...p.target.keys, key] } }
+    })
+  },
+
+  // ---- 機能設定 ----
+  setList(name, list) {
+    updateProject((p) => ({ ...p, [name]: list }))
+  },
+
+  setQmk(qmk) {
+    updateProject((p) => ({ ...p, qmk }))
+  },
+
+  setKanata(kanata) {
+    updateProject((p) => ({ ...p, kanata }))
+  },
+
+  setFeatureTab(tab) {
+    setState({ featureTab: tab })
+  },
+
+  // ---- ファイル ----
+  exportKbd() {
+    try {
+      exportKbdFile(getState().project)
+    } catch (err) {
+      alert(`変換に失敗しました: ${err.message}`)
+    }
+  },
+
+  saveProject() {
+    saveProjectFile(getState().project)
+  },
+
+  newProject() {
+    if (!confirm('現在の内容を破棄して新規作成しますか？')) return
+    clearAutoSave()
+    setState({ project: createProject({ layoutId: 'jis-laptop' }), view: 'mapping', activeLayer: 0, selectedTarget: null, selectedSource: null, pickSegment: null, keyLabelMode: 'jis' })
+  },
 }
 
 // ============================================================
-// タップダンスCRUD (GUI形式)
+// 描画
 // ============================================================
 
-export function addTapDance() {
-  const state = getState()
-  const tds = state.tapDancesGui || []
-  const newId = tds.length > 0 ? Math.max(...tds.map((t) => t.id)) + 1 : 0
-  setState({ tapDancesGui: [...tds, { id: newId, timeout: 200, actions: [] }] })
+let hoverSource = null
+let hoverTarget = null
+
+function segmentIndexMap(resolved) {
+  const m = new Map()
+  resolved.segments.forEach((seg, i) => seg.keys.forEach((s) => m.set(s, i)))
+  return m
 }
 
-export function removeTapDance(id) {
-  const state = getState()
-  setState({ tapDancesGui: (state.tapDancesGui || []).filter((t) => t.id !== id) })
-}
+function renderTargetKeyboard(state, resolved) {
+  const container = document.getElementById('keyboard-container')
+  const { project, view, keyLabelMode: mode, activeLayer } = state
+  const tk = project.target.keys
+  const source = project.source
+  const segIdx = segmentIndexMap(resolved)
+  const layerNames = resolved.layers.map((l) => l.name)
+  const defsrc = new Set(resolved.defsrc)
 
-export function updateTapDance(id, updates) {
-  const state = getState()
-  setState({
-    tapDancesGui: (state.tapDancesGui || []).map((t) => (t.id === id ? { ...t, ...updates } : t)),
+  renderKeyboard(container, tk, {
+    render: (t) => {
+      const k = tk[t]
+      const classes = []
+      if (k.fixed) classes.push('key-fixed')
+      if (state.layoutEditMode) {
+        if (state.selectedTarget === t) classes.push('key-selected')
+        return { main: k.label || k.kanataKey || '', corner: k.kanataKey, classes, title: k.kanataKey }
+      }
+      const s = resolved.inverse[t]
+      if (view === 'mapping') {
+        if (s === null) {
+          classes.push('key-passthrough')
+          return { main: k.label || getKeyLabel(k.kanataKey, mode), classes, title: '対応付けなし (Kanata を通さずそのまま入力)' }
+        }
+        if (hoverSource === s) classes.push('key-hover-link')
+        const label = keyConfigLabel(source.layers[0][s], mode, layerNames)
+        return {
+          ...label,
+          classes,
+          badge: s + 1,
+          corner: k.label || k.kanataKey,
+          style: { background: segmentColor(segIdx.get(s) ?? 0) },
+          title: `ノートPC: ${k.label || k.kanataKey} ← 自作キーボード #${s + 1}`,
+        }
+      }
+      // キーマップ表示
+      const kc = resolved.layers[activeLayer].keys[t]
+      const label = keyConfigLabel(kc, mode, layerNames)
+      if (!defsrc.has(t)) classes.push('key-passthrough')
+      if (state.selectedTarget === t) classes.push('key-selected')
+      if (project.edits?.[activeLayer]?.[t]) classes.push('key-edited')
+      if (hoverSource !== null && resolved.inverse[t] === hoverSource) classes.push('key-hover-link')
+      return { ...label, classes, corner: k.kanataKey, title: `${k.label || k.kanataKey}${s !== null ? ` ← 自作 #${s + 1}` : ''}` }
+    },
+    onClick: (t, e) => {
+      const s = getState()
+      if (s.layoutEditMode) return actions.selectTarget(t)
+      if (s.view === 'mapping') {
+        if (tk[t].fixed) return
+        if (s.pickSegment) {
+          actions.setStart(s.pickSegment, t)
+          setState({ pickSegment: null })
+        } else if (s.selectedSource !== null) {
+          actions.pin(s.selectedSource, t)
+        } else if (resolved.inverse[t] !== null) {
+          setState({ selectedSource: resolved.inverse[t] })
+        }
+        return
+      }
+      if (e.shiftKey) return actions.toggleDefsrc(t)
+      actions.selectTarget(t)
+    },
+    onContext: (t) => {
+      const s = getState()
+      if (s.layoutEditMode) return actions.deleteTargetKey(t)
+      if (s.view === 'mapping') {
+        const src = resolved.inverse[t]
+        if (src !== null) actions.pin(src, null)
+        return
+      }
+      actions.toggleDefsrc(t)
+    },
+    draggable: () => !state.layoutEditMode && view === 'keymap',
+    dragData: (t) => `tgt:${t}`,
+    onDrop: (data, t) => {
+      if (data.startsWith('src:')) actions.pin(parseInt(data.slice(4), 10), t)
+      else if (data.startsWith('tgt:')) {
+        const from = parseInt(data.slice(4), 10)
+        if (from !== t) actions.swapKeys(getState().activeLayer, from, t)
+      }
+    },
+    onHover: (t) => {
+      hoverTarget = t
+      highlightSource()
+    },
   })
 }
 
-export function addTapDanceAction(tdId) {
-  const state = getState()
-  setState({
-    tapDancesGui: (state.tapDancesGui || []).map((t) => {
-      if (t.id !== tdId) return t
-      return { ...t, actions: [...(t.actions || []), { type: 'basic', kanataKey: '', label: '' }] }
-    }),
-  })
-}
+function renderSourceKeyboard(state, resolved) {
+  const pane = document.getElementById('vil-keyboard-pane')
+  const container = document.getElementById('vil-keyboard-container')
+  const { project, view, keyLabelMode: mode, activeLayer } = state
+  const source = project.source
+  if (!source) {
+    pane.style.display = 'none'
+    container.innerHTML = ''
+    return
+  }
+  pane.style.display = ''
+  const tk = project.target.keys
+  const segIdx = segmentIndexMap(resolved)
+  const layerNames = resolved.layers.map((l) => l.name)
+  const layer = view === 'mapping' ? 0 : Math.min(activeLayer, source.layers.length - 1)
+  document.getElementById('vil-keyboard-label').textContent =
+    `自作キーボード: ${source.name || ''} (レイヤー ${layer}${view === 'mapping' ? '・対応付けはベースレイヤーで表示' : ''})`
 
-export function removeTapDanceAction(tdId, actionIndex) {
-  const state = getState()
-  setState({
-    tapDancesGui: (state.tapDancesGui || []).map((t) => {
-      if (t.id !== tdId) return t
-      return { ...t, actions: (t.actions || []).filter((_, i) => i !== actionIndex) }
-    }),
-  })
-}
-
-export function updateTapDanceAction(tdId, actionIndex, updates) {
-  const state = getState()
-  setState({
-    tapDancesGui: (state.tapDancesGui || []).map((t) => {
-      if (t.id !== tdId) return t
+  renderKeyboard(container, source.keys, {
+    render: (s) => {
+      const label = keyConfigLabel(source.layers[layer][s], mode, layerNames)
+      const t = resolved.map[s]
+      const classes = ['vil-key']
+      if (t === null) classes.push('key-unmapped')
+      if (state.selectedSource === s) classes.push('key-selected')
+      if (view === 'keymap' && state.selectedTarget !== null && t === state.selectedTarget) classes.push('key-hover-link')
       return {
-        ...t,
-        actions: (t.actions || []).map((a, i) => (i === actionIndex ? { ...a, ...updates } : a)),
+        ...label,
+        classes,
+        badge: s + 1,
+        corner: t !== null ? (tk[t].label || tk[t].kanataKey) : '未割当',
+        style: view === 'mapping' ? { background: segmentColor(segIdx.get(s) ?? 0) } : undefined,
+        title: `#${s + 1} (row ${source.keys[s].row}, col ${source.keys[s].col}) → ${t !== null ? tk[t].kanataKey : '未割当'}`,
       }
-    }),
+    },
+    onClick: (s) => {
+      const st = getState()
+      if (st.view === 'mapping') {
+        setState({ selectedSource: st.selectedSource === s ? null : s, pickSegment: null })
+      } else if (resolved.map[s] !== null) {
+        actions.selectTarget(resolved.map[s])
+      }
+    },
+    onContext: (s) => actions.pin(s, null),
+    draggable: () => true,
+    dragData: (s) => `src:${s}`,
+    onHover: (s) => {
+      hoverSource = s
+      highlightTarget()
+    },
   })
 }
 
-// ============================================================
-// 機能タブUI
-// ============================================================
+// ホバー時の対応キー強調 (再描画なしで class を切り替える)
+function highlightTarget() {
+  const resolved = getResolved()
+  document.querySelectorAll('#keyboard-container .key').forEach((node) => {
+    const t = Number(node.dataset.index)
+    node.classList.toggle('key-hover-link', hoverSource !== null && resolved.inverse[t] === hoverSource)
+  })
+}
 
-function updateFeatureTabs(state) {
-  const tabs = document.querySelectorAll('.feature-tab')
-  for (const tab of tabs) {
-    if (tab.dataset.tab === activeFeatureTab) {
-      tab.classList.add('feature-tab-active')
-    } else {
-      tab.classList.remove('feature-tab-active')
+function highlightSource() {
+  const resolved = getResolved()
+  document.querySelectorAll('#vil-keyboard-container .key').forEach((node) => {
+    const s = Number(node.dataset.index)
+    node.classList.toggle('key-hover-link', hoverTarget !== null && resolved.map[s] === hoverTarget)
+  })
+}
+
+const FEATURE_TABS = [
+  ['key', 'キー設定'],
+  ['macros', 'マクロ'],
+  ['tap-dance', 'タップダンス'],
+  ['combos', 'コンボ'],
+  ['overrides', 'オーバーライド'],
+  ['settings', 'Vial設定'],
+  ['preview', '出力プレビュー'],
+]
+
+function renderFeatureTabs(state) {
+  const container = document.getElementById('feature-tabs')
+  container.innerHTML = ''
+  const p = state.project
+  const counts = { macros: p.macros?.length, 'tap-dance': p.tapDances?.length, combos: p.combos?.length, overrides: (p.keyOverrides?.length || 0) + (p.altRepeatKeys?.length || 0) }
+  for (const [id, label] of FEATURE_TABS) {
+    const btn = document.createElement('button')
+    btn.className = `feature-tab${state.featureTab === id ? ' feature-tab-active' : ''}`
+    btn.textContent = label
+    if (counts[id]) {
+      const b = document.createElement('span')
+      b.className = 'feature-tab-badge'
+      b.textContent = counts[id]
+      btn.appendChild(b)
     }
-  }
-
-  // バッジ更新
-  const macros = state.macros || []
-  const tapDancesGui = state.tapDancesGui || []
-  const combos = state.combos || []
-  const overrides = state.keyOverrides || []
-
-  const badgeMacros = document.getElementById('badge-macros')
-  const badgeTapDance = document.getElementById('badge-tap-dance')
-  const badgeCombos = document.getElementById('badge-combos')
-  const badgeOverrides = document.getElementById('badge-overrides')
-
-  if (badgeMacros) badgeMacros.textContent = macros.length > 0 ? macros.length : ''
-  if (badgeTapDance) badgeTapDance.textContent = tapDancesGui.length > 0 ? tapDancesGui.length : ''
-  if (badgeCombos) badgeCombos.textContent = combos.length > 0 ? combos.length : ''
-  if (badgeOverrides) badgeOverrides.textContent = overrides.length > 0 ? overrides.length : ''
-
-  // 選択キーの表示を「キー設定」タブに反映
-  const keymapTab = document.querySelector('.feature-tab[data-tab="keymap"]')
-  if (keymapTab) {
-    if (state.selectedKey !== null && state.physicalLayout?.[state.selectedKey]) {
-      const physKey = state.physicalLayout[state.selectedKey]
-      keymapTab.textContent = `キー設定: ${physKey.label || physKey.kanataKey}`
-    } else {
-      keymapTab.textContent = 'キー設定'
-    }
+    btn.addEventListener('click', () => actions.setFeatureTab(id))
+    container.appendChild(btn)
   }
 }
 
-function renderFeaturePanel(state) {
-  const editorPanel = document.getElementById('editor-panel')
-  const featurePanel = document.getElementById('feature-panel')
-
-  if (activeFeatureTab === 'keymap') {
-    if (featurePanel) featurePanel.style.display = 'none'
-    if (editorPanel) {
-      if (state.selectedKey !== null) {
-        editorPanel.style.display = 'block'
-        renderEditor(state)
-      } else {
-        hideEditor()
-      }
-    }
-  } else {
-    if (editorPanel) editorPanel.style.display = 'none'
-    if (featurePanel) {
-      featurePanel.style.display = 'block'
-
-      const comboCallbacks = {
-        onAddCombo: addCombo,
-        onRemoveCombo: removeCombo,
-        onUpdateCombo: updateCombo,
-      }
-      const overrideCallbacks = {
-        onAddOverride: addOverride,
-        onRemoveOverride: removeOverride,
-        onUpdateOverride: updateOverride,
-      }
-      const macroCallbacks = {
-        onAddMacro: addMacro,
-        onRemoveMacro: removeMacro,
-        onUpdateMacro: updateMacro,
-        onAddMacroAction: addMacroAction,
-        onRemoveMacroAction: removeMacroAction,
-        onUpdateMacroAction: updateMacroAction,
-      }
-      const tapDanceCallbacks = {
-        onAddTapDance: addTapDance,
-        onRemoveTapDance: removeTapDance,
-        onUpdateTapDance: updateTapDance,
-        onAddTapDanceAction: addTapDanceAction,
-        onRemoveTapDanceAction: removeTapDanceAction,
-        onUpdateTapDanceAction: updateTapDanceAction,
-      }
-
-      switch (activeFeatureTab) {
-        case 'macros':
-          renderMacrosPanel(state, macroCallbacks)
-          break
-        case 'tap-dance':
-          renderTapDancePanel(state, tapDanceCallbacks)
-          break
-        case 'combos':
-          renderCombosPanel(state, comboCallbacks)
-          break
-        case 'overrides':
-          renderOverridesPanel(state, overrideCallbacks)
-          break
-        default:
-          break
-      }
-    }
+function renderFeaturePanel(state, resolved) {
+  const editor = document.getElementById('editor-panel')
+  const feature = document.getElementById('feature-panel')
+  if (state.featureTab === 'key') {
+    feature.style.display = 'none'
+    editor.style.display = 'block'
+    renderEditor(state, resolved, actions)
+    return
   }
+  editor.style.display = 'none'
+  feature.style.display = 'block'
+  switch (state.featureTab) {
+    case 'macros': return renderMacrosPanel(state, actions)
+    case 'tap-dance': return renderTapDancePanel(state, resolved, actions)
+    case 'combos': return renderCombosPanel(state, resolved, actions)
+    case 'overrides': return renderOverridesPanel(state, resolved, actions)
+    case 'settings': return renderSettingsPanel(state, actions)
+    case 'preview': return renderPreviewPanel(state, actions)
+    default: return undefined
+  }
+}
+
+let saveTimer = null
+
+function render(state) {
+  const resolved = getResolved()
+  const isMapping = state.view === 'mapping' && !state.layoutEditMode
+
+  document.querySelectorAll('.view-tab').forEach((b) => b.classList.toggle('view-tab-active', b.dataset.view === state.view))
+  document.getElementById('btn-label-us').classList.toggle('defsrc-btn-active', state.keyLabelMode === 'us')
+  document.getElementById('btn-label-jis').classList.toggle('defsrc-btn-active', state.keyLabelMode === 'jis')
+  document.getElementById('btn-layout-edit').classList.toggle('defsrc-btn-active', state.layoutEditMode)
+  document.getElementById('layout-edit-panel').style.display = state.layoutEditMode ? 'flex' : 'none'
+  document.getElementById('target-keyboard-label').textContent = state.layoutEditMode
+    ? 'ノートPC配列の編集 (クリック: 編集 / 右クリック: 削除)'
+    : `ノートPC: ${LAYOUT_PRESETS[state.project.target.layoutId]?.name || state.project.target.layoutId}${isMapping ? '' : ` — レイヤー ${state.activeLayer}: ${resolved.layers[state.activeLayer]?.name || ''}`}`
+  document.getElementById('status-summary').textContent = summary(state, resolved)
+  const hint = document.getElementById('defsrc-hint')
+  hint.innerHTML = isMapping
+    ? '自作キーをクリック → ノートPCのキーをクリックで割り当て<br>ドラッグ&ドロップも可 / 右クリックで解除'
+    : state.layoutEditMode
+      ? 'クリック: キー名を編集<br>右クリック: キーを削除'
+      : 'クリック: キー設定<br>Shift+クリック / 右クリック: リマップ対象の切替<br>ドラッグ&ドロップ: キー入れ替え'
+
+  const rowSelect = document.getElementById('new-key-row')
+  if (state.layoutEditMode && rowSelect) {
+    const prev = rowSelect.value
+    rowSelect.innerHTML = ''
+    const rows = [...new Set(state.project.target.keys.map((k) => k.y))].sort((a, b) => a - b)
+    rows.forEach((y, i) => rowSelect.appendChild(Object.assign(document.createElement('option'), { value: y, textContent: `${i + 1} 段目` })))
+    if (prev) rowSelect.value = prev
+  }
+
+  renderTargetKeyboard(state, resolved)
+  renderSourceKeyboard(state, resolved)
+
+  document.getElementById('mapping-panel').style.display = isMapping ? '' : 'none'
+  document.getElementById('keymap-area').style.display = isMapping ? 'none' : ''
+  if (isMapping) {
+    renderMappingPanel(state, resolved, actions)
+  } else {
+    renderLayers(state, resolved, actions)
+    renderFeatureTabs(state)
+    renderFeaturePanel(state, resolved)
+  }
+
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => autoSave(getState().project), 400)
+}
+
+function summary(state, resolved) {
+  const p = state.project
+  if (!p.source) return '.vil 未読み込み'
+  const mapped = resolved.map.filter((t) => t !== null).length
+  return `${p.source.name || '自作キーボード'}: ${mapped}/${p.source.keys.length} キー割り当て済み / ${resolved.layers.length} レイヤー`
 }
 
 // ============================================================
 // 初期化
 // ============================================================
 
-async function initApp() {
-  const layoutSelect = document.getElementById('layout-select')
-  for (const layout of getAvailableLayouts()) {
-    const option = document.createElement('option')
-    option.value = layout.id
-    option.textContent = layout.name
-    layoutSelect.appendChild(option)
+async function handleFiles(input, fn) {
+  const files = [...input.files]
+  input.value = ''
+  if (files.length === 0) return
+  try {
+    const next = await fn(getState().project, files)
+    const warnings = next.source?.warnings || []
+    setState({ project: next, activeLayer: 0, selectedTarget: null, selectedSource: null, pickSegment: null, view: 'mapping' })
+    if (warnings.length) console.warn('読み込み時の注意:\n' + warnings.join('\n'))
+  } catch (err) {
+    alert(err.message)
   }
+}
 
-  layoutSelect.addEventListener('change', (e) => {
-    changeLayout(e.target.value)
-  })
-
-  document.getElementById('btn-import-vil').addEventListener('click', () => {
-    document.getElementById('file-input-vil').click()
-  })
-
-  document.getElementById('file-input-vil').addEventListener('change', async (e) => {
-    const file = e.target.files[0]
-    if (file) {
-      await importVil(file)
-      e.target.value = ''
-    }
-  })
-
-  document.getElementById('btn-export-kbd').addEventListener('click', () => {
-    exportKbd()
-  })
-
-  document.getElementById('btn-save-project').addEventListener('click', () => {
-    saveProject()
-  })
-
-  document.getElementById('btn-load-project').addEventListener('click', () => {
-    document.getElementById('file-input-project').click()
-  })
-
+function initApp() {
+  document.querySelectorAll('.view-tab').forEach((b) => b.addEventListener('click', () => actions.setView(b.dataset.view)))
+  document.getElementById('btn-export-kbd').addEventListener('click', actions.exportKbd)
+  document.getElementById('btn-save-project').addEventListener('click', actions.saveProject)
+  document.getElementById('btn-new-project').addEventListener('click', actions.newProject)
+  document.getElementById('btn-load-project').addEventListener('click', () => document.getElementById('file-input-project').click())
+  document.getElementById('btn-import-vil').addEventListener('click', actions.importVil)
+  document.getElementById('file-input-vil').addEventListener('change', (e) => handleFiles(e.target, importVilFiles))
+  document.getElementById('file-input-extras').addEventListener('change', (e) => handleFiles(e.target, importExtraFiles))
   document.getElementById('file-input-project').addEventListener('change', async (e) => {
     const file = e.target.files[0]
-    if (file) {
-      await loadProject(file)
-      e.target.value = ''
+    e.target.value = ''
+    if (!file) return
+    try {
+      const project = await readProjectFile(file)
+      setState({ project, activeLayer: 0, selectedTarget: null, selectedSource: null, pickSegment: null, keyLabelMode: LAYOUT_PRESETS[project.target.layoutId]?.keyLabelMode || getState().keyLabelMode })
+    } catch (err) {
+      alert(`プロジェクトの読み込みに失敗しました: ${err.message}`)
     }
   })
-
-  document.getElementById('btn-defsrc-all').addEventListener('click', () => {
-    selectAllDefsrcKeys()
+  document.getElementById('btn-label-us').addEventListener('click', () => setState({ keyLabelMode: 'us' }))
+  document.getElementById('btn-label-jis').addEventListener('click', () => setState({ keyLabelMode: 'jis' }))
+  document.getElementById('btn-layout-edit').addEventListener('click', () => setState((s) => ({ layoutEditMode: !s.layoutEditMode, selectedTarget: null, view: s.layoutEditMode ? s.view : 'keymap', featureTab: 'key' })))
+  document.getElementById('btn-add-layout-key').addEventListener('click', () => {
+    const kanataKey = document.getElementById('new-key-kanata').value.trim()
+    const label = document.getElementById('new-key-label').value.trim()
+    const width = parseFloat(document.getElementById('new-key-width').value) || 1
+    const rowY = parseFloat(document.getElementById('new-key-row').value)
+    if (!kanataKey || Number.isNaN(rowY)) return
+    actions.addTargetKey(kanataKey, label, width, rowY)
+    document.getElementById('new-key-kanata').value = ''
+    document.getElementById('new-key-label').value = ''
+  })
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') setState({ selectedSource: null, pickSegment: null, selectedTarget: null })
   })
 
-  document.getElementById('btn-defsrc-clear').addEventListener('click', () => {
-    clearAllDefsrcKeys()
-  })
-
-  document.getElementById('tap-time').addEventListener('change', (e) => {
-    const state = getState()
-    const val = parseInt(e.target.value, 10)
-    if (!isNaN(val) && val > 0) {
-      setState({ settings: { ...state.settings, tapTime: val } })
-    }
-  })
-
-  document.getElementById('hold-time').addEventListener('change', (e) => {
-    const state = getState()
-    const val = parseInt(e.target.value, 10)
-    if (!isNaN(val) && val > 0) {
-      setState({ settings: { ...state.settings, holdTime: val } })
-    }
-  })
-
-  document.getElementById('cfg-process-unmapped').addEventListener('change', (e) => {
-    const state = getState()
-    setState({ settings: { ...state.settings, processUnmappedKeys: e.target.checked } })
-  })
-
-  document.getElementById('cfg-concurrent-tap-hold').addEventListener('change', (e) => {
-    const state = getState()
-    setState({ settings: { ...state.settings, concurrentTapHold: e.target.checked } })
-  })
-
-  document.getElementById('cfg-rapid-event-delay').addEventListener('change', (e) => {
-    const state = getState()
-    const val = parseInt(e.target.value, 10)
-    if (!isNaN(val) && val >= 0) {
-      setState({ settings: { ...state.settings, rapidEventDelay: val } })
-    }
-  })
-
-  // 機能タブクリックハンドラ
-  const featureTabs = document.querySelectorAll('.feature-tab')
-  for (const tab of featureTabs) {
-    tab.addEventListener('click', () => {
-      activeFeatureTab = tab.dataset.tab
-      const s = getState()
-      updateFeatureTabs(s)
-      renderFeaturePanel(s)
-    })
+  window.addEventListener('pagehide', () => autoSave(getState().project))
+  subscribe(render)
+  const restored = autoLoad()
+  if (restored) {
+    setState({ project: restored, keyLabelMode: LAYOUT_PRESETS[restored.target.layoutId]?.keyLabelMode || 'jis' })
+  } else {
+    render(getState())
   }
-
-  // コールバック登録（循環依存回避）
-  setSelectKeyCallback(selectKey)
-  setToggleDefsrcCallback(toggleDefsrcKey)
-  setDeleteLayoutKeyCallback(deleteLayoutKey)
-  setSwapKeysCallback(swapKeys)
-  setDropVilKeyCallback(dropVilKey)
-  setUpdateKeyCallback(updateKey)
-  setUpdatePhysicalKeyCallback(updatePhysicalKey)
-  setLayerCallbacks({ setActiveLayer, addLayer, removeLayer, renameLayer, enterSrcMode })
-
-  // キーラベルモード切替ボタン
-  document.getElementById('btn-label-us')?.addEventListener('click', () => {
-    setKeyLabelMode('us')
-  })
-  document.getElementById('btn-label-jis')?.addEventListener('click', () => {
-    setKeyLabelMode('jis')
-  })
-
-  // キー追加フォーム
-  document.getElementById('btn-add-layout-key')?.addEventListener('click', () => {
-    const kanataKey = document.getElementById('new-key-kanata')?.value.trim()
-    const label = document.getElementById('new-key-label')?.value.trim()
-    const widthStr = document.getElementById('new-key-width')?.value
-    const rowStr = document.getElementById('new-key-row')?.value
-
-    if (!kanataKey) return
-    const width = parseFloat(widthStr) || 1
-    const rowY = parseFloat(rowStr)
-    if (isNaN(rowY)) return
-
-    addLayoutKey(kanataKey, label, width, rowY)
-
-    // 入力クリア
-    const kanataInput = document.getElementById('new-key-kanata')
-    const labelInput = document.getElementById('new-key-label')
-    if (kanataInput) kanataInput.value = ''
-    if (labelInput) labelInput.value = ''
-  })
-
-  // 状態変更時の再描画
-  subscribe((s) => {
-    renderKeyboard(s)
-    renderVilKeyboard(s)
-    renderLayers(s)
-    renderDefsrcPanel(s)
-    updateFeatureTabs(s)
-    renderFeaturePanel(s)
-
-    // layout-selectの選択状態を同期
-    const layoutSelectEl = document.getElementById('layout-select')
-    if (layoutSelectEl && layoutSelectEl.value !== s.layout) {
-      layoutSelectEl.value = s.layout
-    }
-
-    // レイアウト編集モード UI 同期
-    const editPanel = document.getElementById('layout-edit-panel')
-    const hintEl = document.getElementById('defsrc-hint')
-
-    if (editPanel) {
-      editPanel.style.display = s.layoutEditMode ? 'flex' : 'none'
-
-      // 行セレクタを physicalLayout に合わせて更新
-      const rowSelect = document.getElementById('new-key-row')
-      if (rowSelect && s.physicalLayout) {
-        const rows = getDistinctRowYValues(s.physicalLayout)
-        const prev = rowSelect.value
-        rowSelect.innerHTML = ''
-        for (const r of rows) {
-          const opt = document.createElement('option')
-          opt.value = r
-          opt.textContent = `Row ${r}`
-          rowSelect.appendChild(opt)
-        }
-        if (prev) rowSelect.value = prev
-      }
-    }
-    // defcfg設定の同期
-    const cfgUnmapped = document.getElementById('cfg-process-unmapped')
-    const cfgConcurrent = document.getElementById('cfg-concurrent-tap-hold')
-    const cfgRapid = document.getElementById('cfg-rapid-event-delay')
-    if (cfgUnmapped) cfgUnmapped.checked = s.settings.processUnmappedKeys !== false
-    if (cfgConcurrent) cfgConcurrent.checked = s.settings.concurrentTapHold !== false
-    if (cfgRapid) cfgRapid.value = s.settings.rapidEventDelay ?? 5
-
-    // キーラベルモード ボタン同期
-    const btnLabelUs = document.getElementById('btn-label-us')
-    const btnLabelJis = document.getElementById('btn-label-jis')
-    if (btnLabelUs) btnLabelUs.classList.toggle('defsrc-btn-active', s.keyLabelMode === 'us')
-    if (btnLabelJis) btnLabelJis.classList.toggle('defsrc-btn-active', s.keyLabelMode === 'jis')
-
-    if (hintEl) {
-      hintEl.innerHTML = s.layoutEditMode
-        ? '左クリック: 物理キー編集　右クリック: キー削除'
-        : '左クリック: キー設定<br>Shift+クリック / 右クリック: defsrc切替<br>ドラッグ&ドロップ: キー入替'
-    }
-  })
-
-  await changeLayout('us-ansi-60')
 }
 
 document.addEventListener('DOMContentLoaded', initApp)

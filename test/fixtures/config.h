@@ -1,0 +1,4 @@
+#pragma once
+#define TAPPING_TERM 190
+#define COMBO_TERM 45
+#define DYNAMIC_KEYMAP_LAYER_COUNT 4

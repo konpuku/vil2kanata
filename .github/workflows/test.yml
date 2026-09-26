@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 変換結果を実際の kanata で構文チェックする
+      - name: Download kanata
+        run: |
+          curl -sSL -o kanata.zip https://github.com/jtroo/kanata/releases/download/v1.10.1/kanata-linux-binaries-v1.10.1-x64.zip
+          unzip -q kanata.zip -d kanata-bin
+          chmod +x kanata-bin/kanata_linux_x64
+          echo "KANATA_BIN=$PWD/kanata-bin/kanata_linux_x64" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: npm test
