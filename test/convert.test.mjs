@@ -217,3 +217,21 @@ test('emitKanata 単体: 空に近い入力でも有効な設定を出力', (t) 
   assert.match(text, /\(deflayer base\n  b +a/)
   assertKanataValid(text, t)
 })
+
+test('Windows + JIS 英数キーに動作を割り当てると警告し、f13 に置き換えると解消される', (t) => {
+  const p = corneProject()
+  p.kanata.os = 'windows'
+  const warnsOf = (proj) => projectToKbd(proj).warnings.filter((w) => w.includes('英数'))
+  assert.equal(warnsOf(p).length, 1) // Corne の Esc/Ctrl (Mod-Tap) が英数キーに割り当たる
+  const eisu = p.target.keys.findIndex((k) => k.kanataKey === 'caps')
+  p.target.keys[eisu] = { ...p.target.keys[eisu], kanataKey: 'f13', label: '英数(F13)', winNoRelease: false }
+  assert.equal(warnsOf(p).length, 0)
+  const { text } = projectToKbd(p)
+  assert.match(text, /\(defsrc\n.*\n  f13 /)
+  assertKanataValid(text, t)
+})
+
+test('Scancode Map (.reg): 英数 (0x3A) → F13 (0x64)', async () => {
+  const { EISU_TO_F13_REG } = await import('../src/core/windows.mjs')
+  assert.match(EISU_TO_F13_REG, /"Scancode Map"=hex:00,00,00,00,00,00,00,00,02,00,00,00,64,00,3a,00,00,00,00,00/)
+})

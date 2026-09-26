@@ -1859,6 +1859,7 @@ function row(y, items, h = 1) {
       label: spec.l || spec.k,
     }
     if (!spec.k) key.fixed = true
+    if (spec.winNoRelease) key.winNoRelease = true
     keys.push(key)
     if (!spec.stack) x += w
   }
@@ -1867,6 +1868,9 @@ function row(y, items, h = 1) {
 
 // Fn 行は 16 キーを 15u 幅に収める
 const fnWidth = (item) => `${item}|${15 / 16}`
+
+// JIS の英数キー: Windows の日本語キーボードドライバーはこのキーの「離した」イベントを送らない
+const EISU = { k: 'caps', l: '英数', w: 1.75, winNoRelease: true }
 
 const NUM_ROW = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
 const Q_ROW = ['q|Q', 'w|W', 'e|E', 'r|R', 't|T', 'y|Y', 'u|U', 'i|I', 'o|O', 'p|P']
@@ -1893,7 +1897,7 @@ const LAYOUT_PRESETS = {
         'f9|F9', 'f10|F10', 'f11|F11', 'f12|F12', 'prnt|PrtSc', 'ins|Insert', 'del|Delete'].map(fnWidth), 0.75),
       row(0.75, ['grv|半/全', ...NUM_ROW, '-', '=|^', '¥|¥', 'bspc|BS']),
       row(1.75, ['tab|Tab|1.5', ...Q_ROW, '[|@', ']|[', 0.25, { k: 'ret', l: 'Enter', w: 1.25, h: 2 }]),
-      row(2.75, ['caps|英数|1.75', ...A_ROW, ';', "'|:", '\\|]']),
+      row(2.75, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3.75, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4.75, [{ k: '', l: 'Fn', w: 1 }, 'lctl|Ctrl', 'lmet|Win', 'lalt|Alt', 'mhnk|無変換|1.25', 'spc|Space|3.25',
         'henk|変換|1.25', 'kana|かな|1.25', 'menu|Menu', 'left|←',
@@ -1906,7 +1910,7 @@ const LAYOUT_PRESETS = {
     rows: [
       row(0, ['grv|半/全', ...NUM_ROW, '-', '=|^', '¥|¥', 'bspc|BS']),
       row(1, ['tab|Tab|1.5', ...Q_ROW, '[|@', ']|[', 0.25, { k: 'ret', l: 'Enter', w: 1.25, h: 2 }]),
-      row(2, ['caps|英数|1.75', ...A_ROW, ';', "'|:", '\\|]']),
+      row(2, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4, ['lctl|Ctrl|1.25', 'lmet|Win|1.25', 'lalt|Alt|1.25', 'mhnk|無変換|1.25', 'spc|Space|3.5',
         'henk|変換|1.25', 'kana|かな|1.25', 'ralt|Alt|1.25', 'menu|Menu|1.25', 'rctl|Ctrl|1.25']),
@@ -2008,6 +2012,94 @@ function textToKeys(text, layout = 'jis') {
   V2K.TEXT_TO_KEYS = TEXT_TO_KEYS;
 })();
 
+// === src/core/windows.mjs ===
+(function() {
+// ============================================================
+// Windows 固有の回避策
+//
+// JIS 配列の Windows では、英数 (Caps Lock) キーは日本語キーボードドライバーが
+// VK_DBE_ALPHANUMERIC (240) として「押した」イベントだけを送り、「離した」イベントを送らない。
+// Kanata からは押しっぱなしに見えるため、tap-hold はホールド扱いになり修飾キーが押されたままになる。
+// レジストリの Scancode Map でキー自体を F13 等に置き換えると、通常どおり押す/離すが届く。
+// ============================================================
+
+// セット1 スキャンコード
+const SCANCODES = { caps: 0x3A, f13: 0x64, f14: 0x65, f15: 0x66, f16: 0x67 }
+
+function hexBytes(n, len) {
+  const out = []
+  for (let i = 0; i < len; i++) out.push(((n >> (8 * i)) & 0xFF).toString(16).padStart(2, '0'))
+  return out
+}
+
+/**
+ * Scancode Map (.reg) を生成
+ * @param {Array<[number, number]>} remaps [[元のスキャンコード, 置き換え後], ...]
+ */
+function scancodeMapReg(remaps) {
+  const bytes = [
+    ...hexBytes(0, 4), // version
+    ...hexBytes(0, 4), // flags
+    ...hexBytes(remaps.length + 1, 4),
+  ]
+  for (const [from, to] of remaps) bytes.push(...hexBytes(to, 2), ...hexBytes(from, 2))
+  bytes.push(...hexBytes(0, 4))
+  return [
+    'Windows Registry Editor Version 5.00',
+    '',
+    '; vil2kanata: JIS 英数キーを F13 に置き換え (サインアウト/再起動後に有効)',
+    '; 元に戻すには vil2kanata-restore-keyboard.reg を実行してください',
+    '[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout]',
+    `"Scancode Map"=hex:${bytes.join(',')}`,
+    '',
+  ].join('\r\n')
+}
+
+function scancodeMapRestoreReg() {
+  return [
+    'Windows Registry Editor Version 5.00',
+    '',
+    '; vil2kanata: Scancode Map を削除してキー配置を元に戻す (サインアウト/再起動後に有効)',
+    '[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout]',
+    '"Scancode Map"=-',
+    '',
+  ].join('\r\n')
+}
+
+const EISU_TO_F13_REG = scancodeMapReg([[SCANCODES.caps, SCANCODES.f13]])
+
+/**
+ * regedit が確実に読める UTF-16LE (BOM 付き) に変換
+ */
+function toUtf16le(text) {
+  const bytes = new Uint8Array(2 + text.length * 2)
+  bytes[0] = 0xFF
+  bytes[1] = 0xFE
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    bytes[2 + i * 2] = c & 0xFF
+    bytes[3 + i * 2] = c >> 8
+  }
+  return bytes
+}
+
+/**
+ * Windows で「離した」イベントが届かない JIS 英数キーか
+ * (旧バージョンで保存したプロジェクトはフラグが無いのでラベルでも判定)
+ */
+function isWinNoReleaseKey(tk) {
+  if (!tk || tk.kanataKey !== 'caps') return false
+  return !!tk.winNoRelease || tk.label === '英数'
+}
+
+  V2K.scancodeMapReg = scancodeMapReg;
+  V2K.scancodeMapRestoreReg = scancodeMapRestoreReg;
+  V2K.toUtf16le = toUtf16le;
+  V2K.isWinNoReleaseKey = isWinNoReleaseKey;
+  V2K.SCANCODES = SCANCODES;
+  V2K.EISU_TO_F13_REG = EISU_TO_F13_REG;
+})();
+
 // === src/core/emit.mjs ===
 (function() {
   const MODIFIER_KEYS = V2K.MODIFIER_KEYS;
@@ -2018,6 +2110,7 @@ function textToKeys(text, layout = 'jis') {
   const completeQmkSettings = V2K.completeQmkSettings;
   const tapHoldActionFor = V2K.tapHoldActionFor;
   const textToKeys = V2K.textToKeys;
+  const isWinNoReleaseKey = V2K.isWinNoReleaseKey;
 
 // ============================================================
 // プロジェクト → Kanata 設定 (.kbd) 出力器
@@ -2036,6 +2129,7 @@ function textToKeys(text, layout = 'jis') {
 // }
 // 戻り値: { text, warnings }
 // ============================================================
+
 
 
 
@@ -2650,6 +2744,21 @@ function emitKanata(projectIn) {
     }
     return emitAction(kc, { layer: li, pos })
   }))
+
+  // Windows の JIS 英数キーは「離した」イベントが届かない (windows.mjs 参照)
+  if (os === 'windows') {
+    for (const pos of defsrcIdx) {
+      const tk = targetKeys[pos]
+      if (!isWinNoReleaseKey(tk)) continue
+      const used = layers.some((l) => {
+        const kc = l.keys?.[pos]
+        return kc && kc.type !== 'transparent' && kc.type !== 'disabled'
+      })
+      if (used) {
+        warn(`${tk.label || '英数'} キー: Windows の JIS 配列ではこのキーを離したイベントが届かないため、Kanata では押しっぱなし扱いになります (tap-hold が常にホールドになり修飾キーが押されたままになる)。レジストリで英数キーを F13 に置き換え、ノートPC配列でこのキーを f13 にしてください (GUI のキー設定、または README 参照)`)
+      }
+    }
+  }
 
   const macroEntries = []
   for (const m of project.macros) {
@@ -4052,6 +4161,155 @@ function step(num, title, children) {
   V2K.renderMappingPanel = renderMappingPanel;
 })();
 
+// === gui/js/export.js ===
+(function() {
+  const importVil = V2K.importVil;
+  const attachSource = V2K.attachSource;
+  const loadProjectData = V2K.loadProjectData;
+  const projectToKbd = V2K.projectToKbd;
+  const serializeProject = V2K.serializeProject;
+
+// ============================================================
+// ファイル入出力 (.vil / vial.json / keymap.c / config.h / プロジェクト / .kbd)
+// ============================================================
+
+
+
+// 最後に読み込んだ入力ファイル (vial.json を後から追加したときの再読込用)
+const rawInputs = { vil: null, vilName: '', vialJson: null, keymapC: null, configH: null }
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function exportKbdFile(project) {
+  const { text } = projectToKbd(project)
+  const base = (project.source?.name || 'keymap').replace(/\.[^.]+$/, '')
+  downloadFile(`${base}.kbd`, text, 'text/plain')
+}
+
+function saveProjectFile(project) {
+  downloadFile('vil2kanata-project.json', serializeProject(project), 'application/json')
+}
+
+async function readProjectFile(file) {
+  return loadProjectData(JSON.parse(await file.text()))
+}
+
+/**
+ * ファイル種別を判定して rawInputs に格納
+ */
+async function classify(files) {
+  for (const file of files) {
+    const text = await file.text()
+    const name = file.name.toLowerCase()
+    if (name.endsWith('.c')) rawInputs.keymapC = text
+    else if (name.endsWith('.h')) rawInputs.configH = text
+    else {
+      let json
+      try {
+        json = JSON.parse(text)
+      } catch {
+        throw new Error(`${file.name}: JSON として読み込めません`)
+      }
+      if (Array.isArray(json.layout)) {
+        rawInputs.vil = json
+        rawInputs.vilName = file.name
+      } else if (json.layouts && json.layouts.keymap) {
+        rawInputs.vialJson = json
+      } else {
+        throw new Error(`${file.name}: .vil / vial.json のどちらでもありません`)
+      }
+    }
+  }
+}
+
+function buildSource() {
+  return importVil(rawInputs.vil, {
+    vialJson: rawInputs.vialJson,
+    keymapC: rawInputs.keymapC,
+    configH: rawInputs.configH,
+    name: rawInputs.vilName,
+  })
+}
+
+/**
+ * .vil (と任意の補助ファイル) を読み込んでプロジェクトに取り込む
+ */
+async function importVilFiles(project, files) {
+  rawInputs.vialJson = null
+  rawInputs.keymapC = null
+  rawInputs.configH = null
+  await classify(files)
+  if (!rawInputs.vil) throw new Error('.vil ファイルが含まれていません')
+  return attachSource(project, buildSource())
+}
+
+/**
+ * vial.json / keymap.c / config.h を後から追加 (手動変更とレイヤー名は保持)
+ */
+async function importExtraFiles(project, files) {
+  await classify(files)
+  if (!rawInputs.vil) throw new Error('先に .vil ファイルを読み込んでください')
+  const next = attachSource(project, buildSource())
+  next.edits = next.edits.map((_, i) => project.edits?.[i] || {})
+  next.layerNames = next.layerNames.map((n, i) => project.layerNames?.[i] || n)
+  return next
+}
+
+// ============================================================
+// 自動保存 (この端末のブラウザのみ)
+// ============================================================
+
+const STORAGE_KEY = 'vil2kanata-project-v2'
+
+function autoSave(project) {
+  try {
+    localStorage.setItem(STORAGE_KEY, serializeProject(project))
+  } catch {
+    // 容量超過・プライベートモード等は無視
+  }
+}
+
+function autoLoad() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return raw ? loadProjectData(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
+}
+
+function clearAutoSave() {
+  try {
+    localStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+  V2K.downloadFile = downloadFile;
+  V2K.exportKbdFile = exportKbdFile;
+  V2K.saveProjectFile = saveProjectFile;
+  V2K.readProjectFile = readProjectFile;
+  V2K.importVilFiles = importVilFiles;
+  V2K.importExtraFiles = importExtraFiles;
+  V2K.autoSave = autoSave;
+  V2K.autoLoad = autoLoad;
+  V2K.clearAutoSave = clearAutoSave;
+})();
+
 // === gui/js/editor.js ===
 (function() {
   const el = V2K.el;
@@ -4060,10 +4318,17 @@ function step(num, title, children) {
   const section = V2K.section;
   const getKeyLabel = V2K.getKeyLabel;
   const keyConfigLabel = V2K.keyConfigLabel;
+  const EISU_TO_F13_REG = V2K.EISU_TO_F13_REG;
+  const isWinNoReleaseKey = V2K.isWinNoReleaseKey;
+  const scancodeMapRestoreReg = V2K.scancodeMapRestoreReg;
+  const toUtf16le = V2K.toUtf16le;
+  const downloadFile = V2K.downloadFile;
 
 // ============================================================
 // キー設定エディタ (選択中のノートPCキー × アクティブレイヤー)
 // ============================================================
+
+
 
 
 
@@ -4109,6 +4374,9 @@ function renderEditor(state, resolved, actions) {
       onclick: () => actions.toggleDefsrc(t),
     }),
   ]))
+  if (isWinNoReleaseKey(tk[t]) && project.kanata.os === 'windows') {
+    panel.appendChild(noReleaseNotice(t, actions))
+  }
   if (!inDefsrc) {
     panel.appendChild(el('p', { class: 'editor-hint', text: 'このキーはリマップ対象外 (defsrc に含まれない) ため、どのレイヤーでもノートPC本来のキーとして動作します。' }))
   }
@@ -4130,6 +4398,20 @@ function renderEditor(state, resolved, actions) {
   }
   const label = keyConfigLabel(kc, mode, layerNames)
   panel.appendChild(el('p', { class: 'editor-hint', text: `表示: ${label.main}${label.sub ? ` / ${label.sub}` : ''}` }))
+}
+
+// JIS 英数キー (Windows では離したイベントが届かない) の回避策
+function noReleaseNotice(t, actions) {
+  return el('div', { class: 'notice-box' }, [
+    el('strong', { text: '注意: Windows では英数キーを「離した」ことを Kanata が検出できません' }),
+    el('p', { text: '日本語キーボードドライバーが英数キーの「押した」イベントしか送らないため、Kanata からは押しっぱなしに見えます。Mod-Tap 等を割り当てるとホールド扱いになり、修飾キーが押されたままになります。' }),
+    el('p', { text: '回避策: ① 下のレジストリ設定で英数キーを F13 に置き換えて再起動 → ② 「このキーを f13 として扱う」を押して .kbd を出力し直す' }),
+    el('div', { class: 'feature-row' }, [
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '① 英数→F13 のレジストリ設定 (.reg)', onclick: () => downloadFile('vil2kanata-eisu-to-f13.reg', toUtf16le(EISU_TO_F13_REG), 'text/plain') }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '元に戻す .reg', onclick: () => downloadFile('vil2kanata-restore-keyboard.reg', toUtf16le(scancodeMapRestoreReg()), 'text/plain') }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '② このキーを f13 として扱う', onclick: () => actions.updateTargetKey(t, { kanataKey: 'f13', label: '英数(F13)', winNoRelease: false }) }),
+    ]),
+  ])
 }
 
 function renderPhysicalEditor(panel, state, actions) {
@@ -4799,155 +5081,6 @@ function renderPreviewPanel(state, actions) {
 }
 
   V2K.renderPreviewPanel = renderPreviewPanel;
-})();
-
-// === gui/js/export.js ===
-(function() {
-  const importVil = V2K.importVil;
-  const attachSource = V2K.attachSource;
-  const loadProjectData = V2K.loadProjectData;
-  const projectToKbd = V2K.projectToKbd;
-  const serializeProject = V2K.serializeProject;
-
-// ============================================================
-// ファイル入出力 (.vil / vial.json / keymap.c / config.h / プロジェクト / .kbd)
-// ============================================================
-
-
-
-// 最後に読み込んだ入力ファイル (vial.json を後から追加したときの再読込用)
-const rawInputs = { vil: null, vilName: '', vialJson: null, keymapC: null, configH: null }
-
-function downloadFile(filename, content, mimeType) {
-  const blob = new Blob([content], { type: mimeType })
-  const url = URL.createObjectURL(blob)
-  try {
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  } finally {
-    URL.revokeObjectURL(url)
-  }
-}
-
-function exportKbdFile(project) {
-  const { text } = projectToKbd(project)
-  const base = (project.source?.name || 'keymap').replace(/\.[^.]+$/, '')
-  downloadFile(`${base}.kbd`, text, 'text/plain')
-}
-
-function saveProjectFile(project) {
-  downloadFile('vil2kanata-project.json', serializeProject(project), 'application/json')
-}
-
-async function readProjectFile(file) {
-  return loadProjectData(JSON.parse(await file.text()))
-}
-
-/**
- * ファイル種別を判定して rawInputs に格納
- */
-async function classify(files) {
-  for (const file of files) {
-    const text = await file.text()
-    const name = file.name.toLowerCase()
-    if (name.endsWith('.c')) rawInputs.keymapC = text
-    else if (name.endsWith('.h')) rawInputs.configH = text
-    else {
-      let json
-      try {
-        json = JSON.parse(text)
-      } catch {
-        throw new Error(`${file.name}: JSON として読み込めません`)
-      }
-      if (Array.isArray(json.layout)) {
-        rawInputs.vil = json
-        rawInputs.vilName = file.name
-      } else if (json.layouts && json.layouts.keymap) {
-        rawInputs.vialJson = json
-      } else {
-        throw new Error(`${file.name}: .vil / vial.json のどちらでもありません`)
-      }
-    }
-  }
-}
-
-function buildSource() {
-  return importVil(rawInputs.vil, {
-    vialJson: rawInputs.vialJson,
-    keymapC: rawInputs.keymapC,
-    configH: rawInputs.configH,
-    name: rawInputs.vilName,
-  })
-}
-
-/**
- * .vil (と任意の補助ファイル) を読み込んでプロジェクトに取り込む
- */
-async function importVilFiles(project, files) {
-  rawInputs.vialJson = null
-  rawInputs.keymapC = null
-  rawInputs.configH = null
-  await classify(files)
-  if (!rawInputs.vil) throw new Error('.vil ファイルが含まれていません')
-  return attachSource(project, buildSource())
-}
-
-/**
- * vial.json / keymap.c / config.h を後から追加 (手動変更とレイヤー名は保持)
- */
-async function importExtraFiles(project, files) {
-  await classify(files)
-  if (!rawInputs.vil) throw new Error('先に .vil ファイルを読み込んでください')
-  const next = attachSource(project, buildSource())
-  next.edits = next.edits.map((_, i) => project.edits?.[i] || {})
-  next.layerNames = next.layerNames.map((n, i) => project.layerNames?.[i] || n)
-  return next
-}
-
-// ============================================================
-// 自動保存 (この端末のブラウザのみ)
-// ============================================================
-
-const STORAGE_KEY = 'vil2kanata-project-v2'
-
-function autoSave(project) {
-  try {
-    localStorage.setItem(STORAGE_KEY, serializeProject(project))
-  } catch {
-    // 容量超過・プライベートモード等は無視
-  }
-}
-
-function autoLoad() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? loadProjectData(JSON.parse(raw)) : null
-  } catch {
-    return null
-  }
-}
-
-function clearAutoSave() {
-  try {
-    localStorage.removeItem(STORAGE_KEY)
-  } catch {
-    // ignore
-  }
-}
-
-  V2K.downloadFile = downloadFile;
-  V2K.exportKbdFile = exportKbdFile;
-  V2K.saveProjectFile = saveProjectFile;
-  V2K.readProjectFile = readProjectFile;
-  V2K.importVilFiles = importVilFiles;
-  V2K.importExtraFiles = importExtraFiles;
-  V2K.autoSave = autoSave;
-  V2K.autoLoad = autoLoad;
-  V2K.clearAutoSave = clearAutoSave;
 })();
 
 // === gui/js/app.js ===

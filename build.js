@@ -25,6 +25,7 @@ const moduleOrder = [
   'src/core/mapping.mjs',
   'src/core/layouts.mjs',
   'src/core/text.mjs',
+  'src/core/windows.mjs',
   'src/core/emit.mjs',
   'src/core/project.mjs',
   'gui/js/store.js',
@@ -33,6 +34,7 @@ const moduleOrder = [
   'gui/js/keyboard.js',
   'gui/js/layers.js',
   'gui/js/mapping-panel.js',
+  'gui/js/export.js',
   'gui/js/editor.js',
   'gui/js/macros.js',
   'gui/js/tap-dance.js',
@@ -40,7 +42,6 @@ const moduleOrder = [
   'gui/js/overrides.js',
   'gui/js/settings-panel.js',
   'gui/js/preview.js',
-  'gui/js/export.js',
   'gui/js/app.js',
 ]
 

@@ -20,6 +20,7 @@ import { MODIFIER_KEYS } from './keycodes.mjs'
 import { keyConfigId, modsToPrefix, sortMods, splitChord } from './qmk.mjs'
 import { completeQmkSettings, tapHoldActionFor } from './settings.mjs'
 import { textToKeys } from './text.mjs'
+import { isWinNoReleaseKey } from './windows.mjs'
 
 export const KANATA_DEFAULTS = {
   os: 'windows',
@@ -630,6 +631,21 @@ export function emitKanata(projectIn) {
     }
     return emitAction(kc, { layer: li, pos })
   }))
+
+  // Windows の JIS 英数キーは「離した」イベントが届かない (windows.mjs 参照)
+  if (os === 'windows') {
+    for (const pos of defsrcIdx) {
+      const tk = targetKeys[pos]
+      if (!isWinNoReleaseKey(tk)) continue
+      const used = layers.some((l) => {
+        const kc = l.keys?.[pos]
+        return kc && kc.type !== 'transparent' && kc.type !== 'disabled'
+      })
+      if (used) {
+        warn(`${tk.label || '英数'} キー: Windows の JIS 配列ではこのキーを離したイベントが届かないため、Kanata では押しっぱなし扱いになります (tap-hold が常にホールドになり修飾キーが押されたままになる)。レジストリで英数キーを F13 に置き換え、ノートPC配列でこのキーを f13 にしてください (GUI のキー設定、または README 参照)`)
+      }
+    }
+  }
 
   const macroEntries = []
   for (const m of project.macros) {

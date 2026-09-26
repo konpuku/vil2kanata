@@ -1217,3 +1217,4 @@ body {
   .segment-question, .segment-badge { grid-column: 2; }
 }
 .feature-row .defsrc-btn, .segment-question .defsrc-btn { width: auto; flex: 0 0 auto; }
+.notice-box { border: 1px solid #EE7733; background: rgba(238, 119, 51, 0.12); border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
