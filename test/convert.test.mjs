@@ -231,7 +231,19 @@ test('Windows + JIS 英数キーに動作を割り当てると警告し、f13 �
   assertKanataValid(text, t)
 })
 
-test('Scancode Map (.reg): 英数 (0x3A) → F13 (0x64)', async () => {
-  const { EISU_TO_F13_REG } = await import('../src/core/windows.mjs')
-  assert.match(EISU_TO_F13_REG, /"Scancode Map"=hex:00,00,00,00,00,00,00,00,02,00,00,00,64,00,3a,00,00,00,00,00/)
+test('Scancode Map (.reg): 英数 (0x3A) → F13 (0x64)、カタカナ/ひらがな (0x70) → F14 (0x65)', async () => {
+  const { JIS_IME_KEYS_REG } = await import('../src/core/windows.mjs')
+  assert.match(JIS_IME_KEYS_REG, /"Scancode Map"=hex:00,00,00,00,00,00,00,00,03,00,00,00,64,00,3a,00,65,00,70,00,00,00,00,00/)
+})
+
+test('Windows + JIS カタカナ/ひらがなキーに動作を割り当てると警告し、f14 に置き換えると解消される', (t) => {
+  const p = corneProject()
+  p.kanata.os = 'windows'
+  const kana = p.target.keys.findIndex((k) => k.kanataKey === 'kana')
+  assert.ok(resolveProject(p).map.includes(kana)) // Corne の右親指が割り当たっている
+  const warnsOf = (proj) => projectToKbd(proj).warnings.filter((w) => w.includes('カタカナ'))
+  assert.equal(warnsOf(p).length, 1)
+  p.target.keys[kana] = { ...p.target.keys[kana], kanataKey: 'f14', label: 'かな(F14)', winNoRelease: false }
+  assert.equal(warnsOf(p).length, 0)
+  assertKanataValid(projectToKbd(p).text, t)
 })

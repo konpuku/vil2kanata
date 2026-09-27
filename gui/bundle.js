@@ -1871,6 +1871,8 @@ const fnWidth = (item) => `${item}|${15 / 16}`
 
 // JIS の英数キー: Windows の日本語キーボードドライバーはこのキーの「離した」イベントを送らない
 const EISU = { k: 'caps', l: '英数', w: 1.75, winNoRelease: true }
+// カタカナ/ひらがなキー: 同様に離したイベントが届かず、Windows の kanata 名 kana とも一致しない
+const KANA = { k: 'kana', l: 'かな', w: 1.25, winNoRelease: true }
 
 const NUM_ROW = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
 const Q_ROW = ['q|Q', 'w|W', 'e|E', 'r|R', 't|T', 'y|Y', 'u|U', 'i|I', 'o|O', 'p|P']
@@ -1900,7 +1902,7 @@ const LAYOUT_PRESETS = {
       row(2.75, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3.75, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4.75, [{ k: '', l: 'Fn', w: 1 }, 'lctl|Ctrl', 'lmet|Win', 'lalt|Alt', 'mhnk|無変換|1.25', 'spc|Space|3.25',
-        'henk|変換|1.25', 'kana|かな|1.25', 'menu|Menu', 'left|←',
+        'henk|変換|1.25', KANA, 'menu|Menu', 'left|←',
         { k: 'up', l: '↑', h: 0.5, stack: true }, { k: 'down', l: '↓', h: 0.5, dy: 0.5 }, 'rght|→']),
     ],
   },
@@ -1913,7 +1915,7 @@ const LAYOUT_PRESETS = {
       row(2, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4, ['lctl|Ctrl|1.25', 'lmet|Win|1.25', 'lalt|Alt|1.25', 'mhnk|無変換|1.25', 'spc|Space|3.5',
-        'henk|変換|1.25', 'kana|かな|1.25', 'ralt|Alt|1.25', 'menu|Menu|1.25', 'rctl|Ctrl|1.25']),
+        'henk|変換|1.25', KANA, 'ralt|Alt|1.25', 'menu|Menu|1.25', 'rctl|Ctrl|1.25']),
     ],
   },
   'us-ansi-60': {
@@ -2017,14 +2019,27 @@ function textToKeys(text, layout = 'jis') {
 // ============================================================
 // Windows 固有の回避策
 //
-// JIS 配列の Windows では、英数 (Caps Lock) キーは日本語キーボードドライバーが
-// VK_DBE_ALPHANUMERIC (240) として「押した」イベントだけを送り、「離した」イベントを送らない。
-// Kanata からは押しっぱなしに見えるため、tap-hold はホールド扱いになり修飾キーが押されたままになる。
-// レジストリの Scancode Map でキー自体を F13 等に置き換えると、通常どおり押す/離すが届く。
+// JIS 配列の Windows では、日本語キーボードドライバーが一部の IME キーについて
+// 「押した」イベントしか送らず「離した」イベントを送らない (kanata --debug で確認済み)。
+// Kanata からは押しっぱなしに見えるため、tap-hold は常にホールドになり修飾キーが押されたままになる。
+//
+//   英数 (Caps Lock, スキャンコード 0x3A)       → Kanata では caps。離したイベントが届かない
+//   カタカナ/ひらがな (スキャンコード 0x70)    → winIOv2 では KEY_KATAKANA(241) として届き、
+//                                               Windows の kanata 名 `kana` (= KEY_HANGEUL) と一致しない。
+//                                               さらに離したイベントも届かない
+//
+// レジストリの Scancode Map でキー自体を F13/F14 に置き換えると、通常どおり押す/離すが届く。
+// Scancode Map は 1 つの値なので、置き換えはまとめて 1 ファイルで設定する。
 // ============================================================
 
 // セット1 スキャンコード
-const SCANCODES = { caps: 0x3A, f13: 0x64, f14: 0x65, f15: 0x66, f16: 0x67 }
+const SCANCODES = { caps: 0x3A, kana: 0x70, f13: 0x64, f14: 0x65, f15: 0x66, f16: 0x67 }
+
+// 回避が必要なキー: Kanata のキー名 → { 元スキャンコード, 置き換え先 }
+const WIN_PROBLEM_KEYS = {
+  caps: { name: '英数', scancode: SCANCODES.caps, replacement: 'f13' },
+  kana: { name: 'カタカナ/ひらがな', scancode: SCANCODES.kana, replacement: 'f14' },
+}
 
 function hexBytes(n, len) {
   const out = []
@@ -2036,7 +2051,7 @@ function hexBytes(n, len) {
  * Scancode Map (.reg) を生成
  * @param {Array<[number, number]>} remaps [[元のスキャンコード, 置き換え後], ...]
  */
-function scancodeMapReg(remaps) {
+function scancodeMapReg(remaps, description) {
   const bytes = [
     ...hexBytes(0, 4), // version
     ...hexBytes(0, 4), // flags
@@ -2047,8 +2062,8 @@ function scancodeMapReg(remaps) {
   return [
     'Windows Registry Editor Version 5.00',
     '',
-    '; vil2kanata: JIS 英数キーを F13 に置き換え (サインアウト/再起動後に有効)',
-    '; 元に戻すには vil2kanata-restore-keyboard.reg を実行してください',
+    `; vil2kanata: ${description} (サインアウト/再起動後に有効)`,
+    '; 既存の Scancode Map は上書きされます。元に戻すには vil2kanata-restore-keyboard.reg を実行してください',
     '[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout]',
     `"Scancode Map"=hex:${bytes.join(',')}`,
     '',
@@ -2066,7 +2081,12 @@ function scancodeMapRestoreReg() {
   ].join('\r\n')
 }
 
-const EISU_TO_F13_REG = scancodeMapReg([[SCANCODES.caps, SCANCODES.f13]])
+// 英数 → F13、カタカナ/ひらがな → F14 をまとめて設定
+const JIS_IME_KEYS_REG = scancodeMapReg(
+  Object.values(WIN_PROBLEM_KEYS).map((k) => [k.scancode, SCANCODES[k.replacement]]),
+  'JIS の英数キーを F13、カタカナ/ひらがなキーを F14 に置き換え',
+)
+const JIS_IME_KEYS_REG_FILENAME = 'vil2kanata-jis-ime-keys-to-f13-f14.reg'
 
 /**
  * regedit が確実に読める UTF-16LE (BOM 付き) に変換
@@ -2084,20 +2104,25 @@ function toUtf16le(text) {
 }
 
 /**
- * Windows で「離した」イベントが届かない JIS 英数キーか
- * (旧バージョンで保存したプロジェクトはフラグが無いのでラベルでも判定)
+ * Windows で正しく扱えない JIS の IME キーなら、その回避情報を返す (該当しなければ null)
+ * JIS プリセット由来のキー (winNoRelease フラグ、または旧バージョンのラベル) のみ対象
  */
-function isWinNoReleaseKey(tk) {
-  if (!tk || tk.kanataKey !== 'caps') return false
-  return !!tk.winNoRelease || tk.label === '英数'
+function winProblemKey(tk) {
+  if (!tk) return null
+  const info = WIN_PROBLEM_KEYS[tk.kanataKey]
+  if (!info) return null
+  const fromJisPreset = tk.winNoRelease || tk.label === '英数' || tk.label === 'かな'
+  return fromJisPreset ? info : null
 }
 
   V2K.scancodeMapReg = scancodeMapReg;
   V2K.scancodeMapRestoreReg = scancodeMapRestoreReg;
   V2K.toUtf16le = toUtf16le;
-  V2K.isWinNoReleaseKey = isWinNoReleaseKey;
+  V2K.winProblemKey = winProblemKey;
   V2K.SCANCODES = SCANCODES;
-  V2K.EISU_TO_F13_REG = EISU_TO_F13_REG;
+  V2K.WIN_PROBLEM_KEYS = WIN_PROBLEM_KEYS;
+  V2K.JIS_IME_KEYS_REG = JIS_IME_KEYS_REG;
+  V2K.JIS_IME_KEYS_REG_FILENAME = JIS_IME_KEYS_REG_FILENAME;
 })();
 
 // === src/core/emit.mjs ===
@@ -2110,7 +2135,7 @@ function isWinNoReleaseKey(tk) {
   const completeQmkSettings = V2K.completeQmkSettings;
   const tapHoldActionFor = V2K.tapHoldActionFor;
   const textToKeys = V2K.textToKeys;
-  const isWinNoReleaseKey = V2K.isWinNoReleaseKey;
+  const winProblemKey = V2K.winProblemKey;
 
 // ============================================================
 // プロジェクト → Kanata 設定 (.kbd) 出力器
@@ -2745,17 +2770,18 @@ function emitKanata(projectIn) {
     return emitAction(kc, { layer: li, pos })
   }))
 
-  // Windows の JIS 英数キーは「離した」イベントが届かない (windows.mjs 参照)
+  // Windows の JIS IME キー (英数・カタカナ/ひらがな) は「離した」イベントが届かない (windows.mjs 参照)
   if (os === 'windows') {
     for (const pos of defsrcIdx) {
       const tk = targetKeys[pos]
-      if (!isWinNoReleaseKey(tk)) continue
+      const info = winProblemKey(tk)
+      if (!info) continue
       const used = layers.some((l) => {
         const kc = l.keys?.[pos]
         return kc && kc.type !== 'transparent' && kc.type !== 'disabled'
       })
       if (used) {
-        warn(`${tk.label || '英数'} キー: Windows の JIS 配列ではこのキーを離したイベントが届かないため、Kanata では押しっぱなし扱いになります (tap-hold が常にホールドになり修飾キーが押されたままになる)。レジストリで英数キーを F13 に置き換え、ノートPC配列でこのキーを f13 にしてください (GUI のキー設定、または README 参照)`)
+        warn(`${info.name}キー: Windows の JIS 配列ではこのキーを離したイベントが Kanata に届かず${tk.kanataKey === 'kana' ? '、キー名も一致しない' : ''}ため正しく動作しません。レジストリで ${info.name}キーを ${info.replacement.toUpperCase()} に置き換え、ノートPC配列でこのキーを ${info.replacement} にしてください (GUI のキー設定、または README 参照)`)
       }
     }
   }
@@ -4318,10 +4344,11 @@ function clearAutoSave() {
   const section = V2K.section;
   const getKeyLabel = V2K.getKeyLabel;
   const keyConfigLabel = V2K.keyConfigLabel;
-  const EISU_TO_F13_REG = V2K.EISU_TO_F13_REG;
-  const isWinNoReleaseKey = V2K.isWinNoReleaseKey;
+  const JIS_IME_KEYS_REG = V2K.JIS_IME_KEYS_REG;
+  const JIS_IME_KEYS_REG_FILENAME = V2K.JIS_IME_KEYS_REG_FILENAME;
   const scancodeMapRestoreReg = V2K.scancodeMapRestoreReg;
   const toUtf16le = V2K.toUtf16le;
+  const winProblemKey = V2K.winProblemKey;
   const downloadFile = V2K.downloadFile;
 
 // ============================================================
@@ -4374,8 +4401,9 @@ function renderEditor(state, resolved, actions) {
       onclick: () => actions.toggleDefsrc(t),
     }),
   ]))
-  if (isWinNoReleaseKey(tk[t]) && project.kanata.os === 'windows') {
-    panel.appendChild(noReleaseNotice(t, actions))
+  const problem = winProblemKey(tk[t])
+  if (problem && project.kanata.os === 'windows') {
+    panel.appendChild(noReleaseNotice(t, problem, actions))
   }
   if (!inDefsrc) {
     panel.appendChild(el('p', { class: 'editor-hint', text: 'このキーはリマップ対象外 (defsrc に含まれない) ため、どのレイヤーでもノートPC本来のキーとして動作します。' }))
@@ -4400,16 +4428,17 @@ function renderEditor(state, resolved, actions) {
   panel.appendChild(el('p', { class: 'editor-hint', text: `表示: ${label.main}${label.sub ? ` / ${label.sub}` : ''}` }))
 }
 
-// JIS 英数キー (Windows では離したイベントが届かない) の回避策
-function noReleaseNotice(t, actions) {
+// JIS の IME キー (Windows では離したイベントが届かない) の回避策
+function noReleaseNotice(t, problem, actions) {
+  const rep = problem.replacement
   return el('div', { class: 'notice-box' }, [
-    el('strong', { text: '注意: Windows では英数キーを「離した」ことを Kanata が検出できません' }),
-    el('p', { text: '日本語キーボードドライバーが英数キーの「押した」イベントしか送らないため、Kanata からは押しっぱなしに見えます。Mod-Tap 等を割り当てるとホールド扱いになり、修飾キーが押されたままになります。' }),
-    el('p', { text: '回避策: ① 下のレジストリ設定で英数キーを F13 に置き換えて再起動 → ② 「このキーを f13 として扱う」を押して .kbd を出力し直す' }),
+    el('strong', { text: `注意: Windows では${problem.name}キーを Kanata で正しく扱えません` }),
+    el('p', { text: `日本語キーボードドライバーがこのキーの「押した」イベントしか送らないため、Kanata からは押しっぱなしに見えます。Mod-Tap 等を割り当てるとホールド扱いになり、修飾キーやレイヤーが押されたままになります。` }),
+    el('p', { text: `回避策: ① 下のレジストリ設定 (英数→F13・カタカナ/ひらがな→F14 をまとめて設定) を実行して再起動 → ② 「このキーを ${rep} として扱う」を押して .kbd を出力し直す` }),
     el('div', { class: 'feature-row' }, [
-      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '① 英数→F13 のレジストリ設定 (.reg)', onclick: () => downloadFile('vil2kanata-eisu-to-f13.reg', toUtf16le(EISU_TO_F13_REG), 'text/plain') }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '① レジストリ設定 (.reg)', onclick: () => downloadFile(JIS_IME_KEYS_REG_FILENAME, toUtf16le(JIS_IME_KEYS_REG), 'text/plain') }),
       el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '元に戻す .reg', onclick: () => downloadFile('vil2kanata-restore-keyboard.reg', toUtf16le(scancodeMapRestoreReg()), 'text/plain') }),
-      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '② このキーを f13 として扱う', onclick: () => actions.updateTargetKey(t, { kanataKey: 'f13', label: '英数(F13)', winNoRelease: false }) }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: `② このキーを ${rep} として扱う`, onclick: () => actions.updateTargetKey(t, { kanataKey: rep, label: `${problem.name}(${rep.toUpperCase()})`, winNoRelease: false }) }),
     ]),
   ])
 }

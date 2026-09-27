@@ -43,6 +43,8 @@ const fnWidth = (item) => `${item}|${15 / 16}`
 
 // JIS の英数キー: Windows の日本語キーボードドライバーはこのキーの「離した」イベントを送らない
 const EISU = { k: 'caps', l: '英数', w: 1.75, winNoRelease: true }
+// カタカナ/ひらがなキー: 同様に離したイベントが届かず、Windows の kanata 名 kana とも一致しない
+const KANA = { k: 'kana', l: 'かな', w: 1.25, winNoRelease: true }
 
 const NUM_ROW = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
 const Q_ROW = ['q|Q', 'w|W', 'e|E', 'r|R', 't|T', 'y|Y', 'u|U', 'i|I', 'o|O', 'p|P']
@@ -72,7 +74,7 @@ export const LAYOUT_PRESETS = {
       row(2.75, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3.75, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4.75, [{ k: '', l: 'Fn', w: 1 }, 'lctl|Ctrl', 'lmet|Win', 'lalt|Alt', 'mhnk|無変換|1.25', 'spc|Space|3.25',
-        'henk|変換|1.25', 'kana|かな|1.25', 'menu|Menu', 'left|←',
+        'henk|変換|1.25', KANA, 'menu|Menu', 'left|←',
         { k: 'up', l: '↑', h: 0.5, stack: true }, { k: 'down', l: '↓', h: 0.5, dy: 0.5 }, 'rght|→']),
     ],
   },
@@ -85,7 +87,7 @@ export const LAYOUT_PRESETS = {
       row(2, [EISU, ...A_ROW, ';', "'|:", '\\|]']),
       row(3, ['lsft|Shift|2.25', ...Z_ROW, ',', '.', '/', 'ro|\\ ろ', 'rsft|Shift|1.75']),
       row(4, ['lctl|Ctrl|1.25', 'lmet|Win|1.25', 'lalt|Alt|1.25', 'mhnk|無変換|1.25', 'spc|Space|3.5',
-        'henk|変換|1.25', 'kana|かな|1.25', 'ralt|Alt|1.25', 'menu|Menu|1.25', 'rctl|Ctrl|1.25']),
+        'henk|変換|1.25', KANA, 'ralt|Alt|1.25', 'menu|Menu|1.25', 'rctl|Ctrl|1.25']),
     ],
   },
   'us-ansi-60': {

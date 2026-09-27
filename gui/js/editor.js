@@ -4,7 +4,7 @@
 
 import { el, keyConfigEditor, keyGrid, section } from './pickers.js'
 import { getKeyLabel, keyConfigLabel } from './labels.js'
-import { EISU_TO_F13_REG, isWinNoReleaseKey, scancodeMapRestoreReg, toUtf16le } from '../../src/core/windows.mjs'
+import { JIS_IME_KEYS_REG, JIS_IME_KEYS_REG_FILENAME, scancodeMapRestoreReg, toUtf16le, winProblemKey } from '../../src/core/windows.mjs'
 import { downloadFile } from './export.js'
 
 export function renderEditor(state, resolved, actions) {
@@ -49,8 +49,9 @@ export function renderEditor(state, resolved, actions) {
       onclick: () => actions.toggleDefsrc(t),
     }),
   ]))
-  if (isWinNoReleaseKey(tk[t]) && project.kanata.os === 'windows') {
-    panel.appendChild(noReleaseNotice(t, actions))
+  const problem = winProblemKey(tk[t])
+  if (problem && project.kanata.os === 'windows') {
+    panel.appendChild(noReleaseNotice(t, problem, actions))
   }
   if (!inDefsrc) {
     panel.appendChild(el('p', { class: 'editor-hint', text: 'このキーはリマップ対象外 (defsrc に含まれない) ため、どのレイヤーでもノートPC本来のキーとして動作します。' }))
@@ -75,16 +76,17 @@ export function renderEditor(state, resolved, actions) {
   panel.appendChild(el('p', { class: 'editor-hint', text: `表示: ${label.main}${label.sub ? ` / ${label.sub}` : ''}` }))
 }
 
-// JIS 英数キー (Windows では離したイベントが届かない) の回避策
-function noReleaseNotice(t, actions) {
+// JIS の IME キー (Windows では離したイベントが届かない) の回避策
+function noReleaseNotice(t, problem, actions) {
+  const rep = problem.replacement
   return el('div', { class: 'notice-box' }, [
-    el('strong', { text: '注意: Windows では英数キーを「離した」ことを Kanata が検出できません' }),
-    el('p', { text: '日本語キーボードドライバーが英数キーの「押した」イベントしか送らないため、Kanata からは押しっぱなしに見えます。Mod-Tap 等を割り当てるとホールド扱いになり、修飾キーが押されたままになります。' }),
-    el('p', { text: '回避策: ① 下のレジストリ設定で英数キーを F13 に置き換えて再起動 → ② 「このキーを f13 として扱う」を押して .kbd を出力し直す' }),
+    el('strong', { text: `注意: Windows では${problem.name}キーを Kanata で正しく扱えません` }),
+    el('p', { text: `日本語キーボードドライバーがこのキーの「押した」イベントしか送らないため、Kanata からは押しっぱなしに見えます。Mod-Tap 等を割り当てるとホールド扱いになり、修飾キーやレイヤーが押されたままになります。` }),
+    el('p', { text: `回避策: ① 下のレジストリ設定 (英数→F13・カタカナ/ひらがな→F14 をまとめて設定) を実行して再起動 → ② 「このキーを ${rep} として扱う」を押して .kbd を出力し直す` }),
     el('div', { class: 'feature-row' }, [
-      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '① 英数→F13 のレジストリ設定 (.reg)', onclick: () => downloadFile('vil2kanata-eisu-to-f13.reg', toUtf16le(EISU_TO_F13_REG), 'text/plain') }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '① レジストリ設定 (.reg)', onclick: () => downloadFile(JIS_IME_KEYS_REG_FILENAME, toUtf16le(JIS_IME_KEYS_REG), 'text/plain') }),
       el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '元に戻す .reg', onclick: () => downloadFile('vil2kanata-restore-keyboard.reg', toUtf16le(scancodeMapRestoreReg()), 'text/plain') }),
-      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: '② このキーを f13 として扱う', onclick: () => actions.updateTargetKey(t, { kanataKey: 'f13', label: '英数(F13)', winNoRelease: false }) }),
+      el('button', { class: 'defsrc-btn defsrc-btn-sm', text: `② このキーを ${rep} として扱う`, onclick: () => actions.updateTargetKey(t, { kanataKey: rep, label: `${problem.name}(${rep.toUpperCase()})`, winNoRelease: false }) }),
     ]),
   ])
 }
