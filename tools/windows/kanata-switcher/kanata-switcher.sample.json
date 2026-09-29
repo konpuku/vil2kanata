@@ -1,0 +1,10 @@
+{
+  "kanataExe": "..\\kanata-windows-binaries-x64-v1.10.1\\kanata_windows_tty_winIOv2_x64.exe",
+  "kanataConfig": "..\\keymap.kbd",
+  "kanataArgs": "-n",
+  "deviceIds": [
+    "VID_FEED&PID_0000"
+  ],
+  "mode": "auto",
+  "pollIntervalMs": 2000
+}

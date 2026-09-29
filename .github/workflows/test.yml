@@ -28,3 +28,23 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  # kanata-switcher (タスクトレイ常駐ツール) を実際の Windows PowerShell 5.1 で検証
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kanata-switcher tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\test\windows\kanata-switcher.tests.ps1
+
+      - name: WinForms / アイコン生成の読み込み確認
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $bmp = New-Object System.Drawing.Bitmap 32, 32
+          [System.Drawing.Icon]::FromHandle($bmp.GetHicon()) | Out-Null
+          New-Object System.Windows.Forms.NotifyIcon | Out-Null
+          Get-CimInstance -ClassName Win32_PnPEntity -Filter "DeviceID LIKE '%VID%PID%'" | Select-Object -First 3 Name, DeviceID, PNPClass
