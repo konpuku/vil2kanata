@@ -22,7 +22,7 @@ export function renderOverridesPanel(state, resolved, actions) {
       text: '+ 追加',
       onclick: () => {
         const id = list.length ? Math.max(...list.map((k) => k.id)) + 1 : 0
-        setList([...list, { id, enabled: true, trigger: { type: 'basic', kanataKey: 'bspc' }, triggerMods: ['lsft'], replacement: { type: 'basic', kanataKey: 'del' }, layers: 0xFFFF, negativeMods: [], suppressedMods: [], oneMod: false }])
+        setList([...list, { id, enabled: true, trigger: { type: 'basic', kanataKey: 'bspc' }, triggerMods: ['lsft'], replacement: { type: 'basic', kanataKey: 'del' }, layers: 0xFFFF, negativeMods: [], suppressedMods: ['lsft'], oneMod: false }])
       },
     }),
   ]))
@@ -48,6 +48,10 @@ export function renderOverridesPanel(state, resolved, actions) {
       modCheckboxes(ko.triggerMods, (mods) => update(ko.id, { triggerMods: mods }), { small: true }),
       el('span', { class: 'feature-operator', text: '+' }),
       keySelect(trigKey, mode, (k) => update(ko.id, { trigger: { type: 'basic', kanataKey: k } }), { className: 'feature-key-select' }),
+    ]))
+    item.appendChild(el('div', { class: 'feature-row feature-row-wrap', title: 'チェックした修飾キーは置換時に解除されます。チェックしない修飾キーは押されたまま置換キーに掛かります (例: Shift+, → 1 で Shift を抑制しないと Shift+1)' }, [
+      el('span', { class: 'feature-unit', text: '抑制する修飾:' }),
+      modCheckboxes(Array.isArray(ko.suppressedMods) ? ko.suppressedMods : ko.triggerMods, (mods) => update(ko.id, { suppressedMods: mods }), { small: true }),
     ]))
     item.appendChild(el('div', { class: 'td-slot' }, [
       el('span', { class: 'feature-unit td-slot-label', text: '→ 置換' }),

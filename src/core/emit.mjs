@@ -724,14 +724,17 @@ export function emitKanata(projectIn) {
       continue
     }
     const rep = ko.replacement
-    let repTokens = null
+    let repMods = null
+    let repBase = null
     if (rep && (rep.type === 'basic' || rep.type === 'modified')) {
-      const { mods, baseKey } = rep.type === 'modified' ? { mods: rep.mods || splitChord(rep.kanataKey).mods, baseKey: rep.baseKey || splitChord(rep.kanataKey).baseKey } : { mods: [], baseKey: rep.kanataKey }
-      repTokens = [...sortMods([...(ko.replacementMods || []), ...mods]), baseKey].map(nameKey)
+      const chord = rep.type === 'modified' ? { mods: rep.mods || splitChord(rep.kanataKey).mods, baseKey: rep.baseKey || splitChord(rep.kanataKey).baseKey } : { mods: [], baseKey: rep.kanataKey }
+      repMods = [...(ko.replacementMods || []), ...chord.mods]
+      repBase = chord.baseKey
     } else if (!rep && ko.replacementKey) {
-      repTokens = [...(ko.replacementMods || []), ko.replacementKey].map(nameKey)
+      repMods = [...(ko.replacementMods || [])]
+      repBase = ko.replacementKey
     }
-    if (!repTokens) {
+    if (!repBase) {
       warn(`キーオーバーライド${ko.id !== undefined ? ` #${ko.id}` : ''}: 置換先が基本キーでないため Kanata では再現できません`)
       continue
     }
@@ -760,9 +763,15 @@ export function emitKanata(projectIn) {
     if (ko.negativeMods && ko.negativeMods.length) {
       warn('キーオーバーライドの Negative mods は Kanata v1.10 の defoverrides では再現できません')
     }
-    overrideLines.push(`  ;; ${[...mods, trigKey].join('+')} → ${repTokens.join('+')}`)
+    // QMK では suppressed_mods に含まれない修飾キーは押されたまま置換キーに掛かる
+    // (例: Shift+, → 1 で Shift を抑制しない = Shift+1)。Kanata の defoverrides は入力側の
+    // 修飾キーを解除するため、残すべき修飾キーを出力側に明示する。
+    // suppressedMods が無い (旧プロジェクト等) 場合は、従来どおりトリガーの修飾キーをすべて抑制
+    const suppressed = new Set(Array.isArray(ko.suppressedMods) ? ko.suppressedMods : mods)
+    const outTokens = (inputMods) => [...sortMods([...inputMods.filter((m) => !suppressed.has(m)), ...repMods]), repBase].map(nameKey)
+    overrideLines.push(`  ;; ${[...mods, trigKey].join('+')} → ${[...sortMods(repMods), repBase].join('+')}${mods.some((m) => !suppressed.has(m)) ? ` (抑制しない修飾: ${mods.filter((m) => !suppressed.has(m)).join(' ')})` : ''}`)
     for (const c of combos) {
-      overrideLines.push(`  (${[...c.map(nameKey), nameKey(trigKey)].join(' ')}) (${repTokens.join(' ')})`)
+      overrideLines.push(`  (${[...c.map(nameKey), nameKey(trigKey)].join(' ')}) (${outTokens(c).join(' ')})`)
     }
   }
 

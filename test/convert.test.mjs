@@ -247,3 +247,29 @@ test('Windows + JIS カタカナ/ひらがなキーに動作を割り当てる�
   assert.equal(warnsOf(p).length, 0)
   assertKanataValid(projectToKbd(p).text, t)
 })
+
+test('キーオーバーライド: 抑制しない修飾キーは置換キーに掛かったまま (QMK の suppressed_mods)', (t) => {
+  const vil = JSON.parse(fx('corne.vil'))
+  vil.key_override = [
+    // Shift+, → 1 (Shift を抑制しない) = Shift+1。JIS では「!」
+    { trigger: 'KC_COMM', replacement: 'KC_1', layers: 65535, trigger_mods: 34, negative_mod_mask: 0, suppressed_mods: 0, options: 128 },
+    // Shift+. → / (Shift を抑制しない) = Shift+/。「?」
+    { trigger: 'KC_DOT', replacement: 'KC_SLSH', layers: 65535, trigger_mods: 34, negative_mod_mask: 0, suppressed_mods: 0, options: 128 },
+    // Shift+Bspc → Del (Shift を抑制) = Del のみ
+    { trigger: 'KC_BSPC', replacement: 'KC_DEL', layers: 65535, trigger_mods: 34, negative_mod_mask: 0, suppressed_mods: 34, options: 128 },
+    // Shift+/ → RSFT(KC_3) (Shift を抑制しない) — 置換側の修飾と重複しても 1 つにまとめる
+    { trigger: 'KC_SLSH', replacement: 'RSFT(KC_3)', layers: 65535, trigger_mods: 34, negative_mod_mask: 0, suppressed_mods: 0, options: 128 },
+  ]
+  const p = attachSource(createProject({ layoutId: 'jis-laptop' }), importVil(vil, { vialJson: fx('vial.json') }))
+  p.kanata.os = 'linux'
+  const { text } = projectToKbd(p)
+  assert.match(text, /\(lsft ,\) \(lsft 1\)/)
+  assert.match(text, /\(rsft ,\) \(rsft 1\)/)
+  assert.match(text, /\(lsft \.\) \(lsft \/\)/)
+  assert.match(text, /\(rsft \.\) \(rsft \/\)/)
+  assert.match(text, /\(lsft bspc\) \(del\)/)
+  assert.match(text, /\(rsft bspc\) \(del\)/)
+  assert.match(text, /\(lsft \/\) \(lsft rsft 3\)/)
+  assert.match(text, /\(rsft \/\) \(rsft 3\)/)
+  assertKanataValid(text, t)
+})

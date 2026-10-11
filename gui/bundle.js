@@ -2862,14 +2862,17 @@ function emitKanata(projectIn) {
       continue
     }
     const rep = ko.replacement
-    let repTokens = null
+    let repMods = null
+    let repBase = null
     if (rep && (rep.type === 'basic' || rep.type === 'modified')) {
-      const { mods, baseKey } = rep.type === 'modified' ? { mods: rep.mods || splitChord(rep.kanataKey).mods, baseKey: rep.baseKey || splitChord(rep.kanataKey).baseKey } : { mods: [], baseKey: rep.kanataKey }
-      repTokens = [...sortMods([...(ko.replacementMods || []), ...mods]), baseKey].map(nameKey)
+      const chord = rep.type === 'modified' ? { mods: rep.mods || splitChord(rep.kanataKey).mods, baseKey: rep.baseKey || splitChord(rep.kanataKey).baseKey } : { mods: [], baseKey: rep.kanataKey }
+      repMods = [...(ko.replacementMods || []), ...chord.mods]
+      repBase = chord.baseKey
     } else if (!rep && ko.replacementKey) {
-      repTokens = [...(ko.replacementMods || []), ko.replacementKey].map(nameKey)
+      repMods = [...(ko.replacementMods || [])]
+      repBase = ko.replacementKey
     }
-    if (!repTokens) {
+    if (!repBase) {
       warn(`キーオーバーライド${ko.id !== undefined ? ` #${ko.id}` : ''}: 置換先が基本キーでないため Kanata では再現できません`)
       continue
     }
@@ -2898,9 +2901,15 @@ function emitKanata(projectIn) {
     if (ko.negativeMods && ko.negativeMods.length) {
       warn('キーオーバーライドの Negative mods は Kanata v1.10 の defoverrides では再現できません')
     }
-    overrideLines.push(`  ;; ${[...mods, trigKey].join('+')} → ${repTokens.join('+')}`)
+    // QMK では suppressed_mods に含まれない修飾キーは押されたまま置換キーに掛かる
+    // (例: Shift+, → 1 で Shift を抑制しない = Shift+1)。Kanata の defoverrides は入力側の
+    // 修飾キーを解除するため、残すべき修飾キーを出力側に明示する。
+    // suppressedMods が無い (旧プロジェクト等) 場合は、従来どおりトリガーの修飾キーをすべて抑制
+    const suppressed = new Set(Array.isArray(ko.suppressedMods) ? ko.suppressedMods : mods)
+    const outTokens = (inputMods) => [...sortMods([...inputMods.filter((m) => !suppressed.has(m)), ...repMods]), repBase].map(nameKey)
+    overrideLines.push(`  ;; ${[...mods, trigKey].join('+')} → ${[...sortMods(repMods), repBase].join('+')}${mods.some((m) => !suppressed.has(m)) ? ` (抑制しない修飾: ${mods.filter((m) => !suppressed.has(m)).join(' ')})` : ''}`)
     for (const c of combos) {
-      overrideLines.push(`  (${[...c.map(nameKey), nameKey(trigKey)].join(' ')}) (${repTokens.join(' ')})`)
+      overrideLines.push(`  (${[...c.map(nameKey), nameKey(trigKey)].join(' ')}) (${outTokens(c).join(' ')})`)
     }
   }
 
@@ -3297,7 +3306,7 @@ function migrateV1(data) {
     replacementMods: k.replacementMods || [],
     layers: 0xFFFF,
     negativeMods: [],
-    suppressedMods: [],
+    suppressedMods: k.triggerMods || [], // 旧 GUI はトリガーの修飾キーをすべて置き換えていた
     oneMod: false,
   }))
   const s = data.settings || {}
@@ -4842,7 +4851,7 @@ function renderOverridesPanel(state, resolved, actions) {
       text: '+ 追加',
       onclick: () => {
         const id = list.length ? Math.max(...list.map((k) => k.id)) + 1 : 0
-        setList([...list, { id, enabled: true, trigger: { type: 'basic', kanataKey: 'bspc' }, triggerMods: ['lsft'], replacement: { type: 'basic', kanataKey: 'del' }, layers: 0xFFFF, negativeMods: [], suppressedMods: [], oneMod: false }])
+        setList([...list, { id, enabled: true, trigger: { type: 'basic', kanataKey: 'bspc' }, triggerMods: ['lsft'], replacement: { type: 'basic', kanataKey: 'del' }, layers: 0xFFFF, negativeMods: [], suppressedMods: ['lsft'], oneMod: false }])
       },
     }),
   ]))
@@ -4868,6 +4877,10 @@ function renderOverridesPanel(state, resolved, actions) {
       modCheckboxes(ko.triggerMods, (mods) => update(ko.id, { triggerMods: mods }), { small: true }),
       el('span', { class: 'feature-operator', text: '+' }),
       keySelect(trigKey, mode, (k) => update(ko.id, { trigger: { type: 'basic', kanataKey: k } }), { className: 'feature-key-select' }),
+    ]))
+    item.appendChild(el('div', { class: 'feature-row feature-row-wrap', title: 'チェックした修飾キーは置換時に解除されます。チェックしない修飾キーは押されたまま置換キーに掛かります (例: Shift+, → 1 で Shift を抑制しないと Shift+1)' }, [
+      el('span', { class: 'feature-unit', text: '抑制する修飾:' }),
+      modCheckboxes(Array.isArray(ko.suppressedMods) ? ko.suppressedMods : ko.triggerMods, (mods) => update(ko.id, { suppressedMods: mods }), { small: true }),
     ]))
     item.appendChild(el('div', { class: 'td-slot' }, [
       el('span', { class: 'feature-unit td-slot-label', text: '→ 置換' }),

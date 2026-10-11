@@ -269,7 +269,7 @@ function migrateV1(data) {
     replacementMods: k.replacementMods || [],
     layers: 0xFFFF,
     negativeMods: [],
-    suppressedMods: [],
+    suppressedMods: k.triggerMods || [], // 旧 GUI はトリガーの修飾キーをすべて置き換えていた
     oneMod: false,
   }))
   const s = data.settings || {}
